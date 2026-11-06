@@ -181,12 +181,23 @@ async function testHealth(base) {
 }
 
 async function testOpportunities(base) {
+  const roles = await fetchJson(base + "/api/work-positions", { method: "GET" }, 12000);
+  if (!roles.res.ok || !Array.isArray(roles.body)) return fail("Open role catalog returned an unexpected response", roles.res.status);
+  if (roles.body.some(role => role.rentEnabled || role.buyEnabled || role.rentPrice || role.buyPrice)) {
+    return fail("An open specialization role exposes commercial terms");
+  }
+  pass(`Open specialization roles reachable (${roles.body.length} roles)`);
   const { res, body } = await fetchJson(base + "/api/opportunities", { method: "GET" }, 12000);
   if (!res.ok || body?.ok !== true || !Array.isArray(body.opportunities)) {
     fail("Opportunity catalog returned an unexpected response", res.status);
     return;
   }
-  pass(`/api/opportunities ok (${body.opportunities.length} listings)`);
+  const invalid = body.opportunities.some(offer =>
+    offer.kind !== "project" || !offer.projectId || !offer.workPositionId || offer.applyEnabled !== false ||
+    (!offer.rentEnabled && !offer.buyEnabled) || Object.hasOwn(offer, "deliverable"),
+  );
+  if (invalid) return fail("The public paid catalog includes a mixed offer, missing project, or private handoff");
+  pass(`Public project offers reachable (${body.opportunities.length} offers)`);
 }
 
 async function testAuthOrdersMy(base, creds) {

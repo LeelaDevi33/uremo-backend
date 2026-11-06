@@ -13,12 +13,13 @@ function noCache(req, res, next) {
 publicRoutes.use(noCache);
 adminRoutes.use(noCache, auth, admin);
 
-publicRoutes.get("/", controller.publicListings);
+const optionalAuth = (req, res, next) => req.headers.authorization ? auth(req, res, next) : next();
+publicRoutes.get("/", optionalAuth, controller.publicListings);
 publicRoutes.get("/mine", auth, controller.mine);
 publicRoutes.get("/:id/access", auth, controller.access);
 publicRoutes.post("/:id/rent", auth, controller.checkout("rent"));
 publicRoutes.post("/:id/buy", auth, controller.checkout("buy"));
-publicRoutes.get("/:id", controller.publicDetail);
+publicRoutes.get("/:id", optionalAuth, controller.publicDetail);
 
 adminRoutes.get("/", controller.adminListings);
 adminRoutes.post("/", controller.saveListing);

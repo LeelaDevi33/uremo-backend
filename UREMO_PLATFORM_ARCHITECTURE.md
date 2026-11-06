@@ -1,5 +1,7 @@
 # UREMO Platform Architecture
 
+This is the June 2025 architecture record. The current marketplace separates free specialization applications from individual project rentals and exclusive purchases. See [the current marketplace workflow and release checks](LOCAL_DEVELOPMENT.md#check-the-admin-and-worker-views-before-releasing).
+
 > **Version:** 1.0  
 > **Last Updated:** June 2025  
 > **Status:** Production Ready (Post-PATCH_27)

@@ -57,6 +57,7 @@ router.post("/screening/:id/submit", submitScreening);
 // Projects
 router.get("/projects", getMyProjects);
 router.get("/project/:id", getProject);
+router.use("/project/:id", require("../services/profileProjects").workAssignmentsOnly);
 router.post("/project/:id/start", startProject);
 router.post("/project/:id/submit", submitProject);
 

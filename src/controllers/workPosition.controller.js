@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
-const { unavailablePositionIds } = require("../services/opportunityApplications");
+const { specializationRoles } = require("../services/roleCatalog");
 const { roleError, withRevision, editRole, removeRole } = require("../services/adminWorkRoles");
 
 const publicPositionFields =
@@ -27,11 +27,11 @@ function roleFields(body, creating) {
 
 exports.listPublic = async (req, res, next) => {
   try {
-    const positions = await WorkPosition.find({ active: true, _id: { $nin: await unavailablePositionIds() } })
+    const positions = await WorkPosition.find({ active: true })
       .select(publicPositionFields)
       .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
-    res.json(positions);
+    res.json(await specializationRoles(positions));
   } catch (err) {
     next(err);
   }
@@ -50,14 +50,13 @@ exports.getByServiceId = async (req, res, next) => {
 
     const position = await WorkPosition.findOne({
       serviceId: serviceId,
-      _id: { $nin: await unavailablePositionIds() },
       active: true,
     })
       .select(publicPositionFields)
       .populate("screeningId", "title passingScore timeLimit")
       .lean();
 
-    if (!position) {
+    if (!position || !(await specializationRoles([position])).length) {
       return res.status(404).json({
         message: "No job role found for this service",
         hasJobRole: false,
@@ -78,7 +77,8 @@ exports.listAdmin = async (req, res, next) => {
     const positions = await WorkPosition.find()
       .sort({ active: -1, sortOrder: 1, createdAt: -1 })
       .lean();
-    res.json(positions.map(withRevision));
+    const specializations = new Set((await specializationRoles(positions)).map(role => String(role._id)));
+    res.json(positions.map(role => ({ ...withRevision(role), isSpecialization: specializations.has(String(role._id)) })));
   } catch (err) {
     next(err);
   }

@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
  */
 const projectSchema = new mongoose.Schema(
   {
+    paidOfferRevision: { type: Number, default: 0, select: false },
     title: {
       type: String,
       required: true,

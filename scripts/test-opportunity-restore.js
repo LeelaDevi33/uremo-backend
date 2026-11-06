@@ -10,7 +10,7 @@ const jwt = require("jsonwebtoken");
 const { MongoClient, BSON, ObjectId } = require("mongoose").mongo;
 const { connectionArgs } = require("./reconcile-wallets");
 
-// This is a recovery rehearsal for the four marketplace collections. Restore
+// Restore the offer, project and role, as well as its wallet and grant history,
 // into a fresh test database and boot a new process so cached state cannot help.
 const bootstrap = `
 const mongoose = require("mongoose");
@@ -54,20 +54,24 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
   const from = client.db(sourceName), to = client.db(restoredName);
   t.after(async () => { await from.dropDatabase(); await to.dropDatabase(); await client.close(); });
   const dir = await mkdtemp(path.join(tmpdir(), "uremo-market-restore-"));
-  const collections = ["users", "opportunities", "opportunitygrants", "wallettransactions"];
+  const collections = ["users", "projects", "workpositions", "opportunities", "opportunitygrants", "wallettransactions"];
   t.after(async () => {
     for (const name of collections) await rm(path.join(dir, name + ".bson"), { force: true });
     await rmdir(dir);
   });
   const secret = randomUUID();
   const buyer = new ObjectId(), rival = new ObjectId(), listing = new ObjectId();
+  const projectId = new ObjectId(), roleId = new ObjectId();
   const token = id => jwt.sign({ id: String(id) }, secret);
   const purchase = { requestId: randomUUID(), expectedAmount: 25 };
   const privateText = "Fixture-only handoff " + randomUUID();
   await from.collection("users").insertMany([buyer, rival].map(_id => ({
     _id, name: "Synthetic member", email: String(_id) + "@example.invalid", role: "user", walletBalance: 100,
   })));
+  await from.collection("workpositions").insertOne({ _id: roleId, title: "Review", category: "design", active: true });
+  await from.collection("projects").insertOne({ _id: projectId, workPositionId: roleId, title: "Design work", status: "open" });
   await from.collection("opportunities").insertOne({ _id: listing, title: "Fixture", description: "Restore QA",
+    projectId, projectRoleId: roleId, applyEnabled: false, projectPublishedAt: new Date(),
     category: "design", rightsConfirmed: true, status: "published", buyEnabled: true, buyPrice: 25, currency: "USD",
     deliverable: privateText, soldAt: null, createdAt: new Date() });
   const service = await launch(uri + "/" + sourceName, secret, t);
@@ -86,6 +90,7 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
   assert.equal(retry.status, 200);
   assert.equal(retry.data.replayed, true);
   assert.equal(retry.data.grant._id, bought.data.grant._id);
+  assert.equal(retry.data.grant.projectId, String(projectId));
   assert.equal((await restored.call("POST", "/" + listing + "/buy", token(rival), { ...purchase, requestId: randomUUID() })).status, 409);
   assert.equal((await restored.call("GET", "/" + listing + "/access", token(buyer))).data.deliverable, privateText);
   assert.equal((await restored.call("GET", "/" + listing + "/access", token(rival))).status, 403);

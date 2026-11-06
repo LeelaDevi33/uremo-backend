@@ -1,3 +1,4 @@
+const { paidProjectAccess } = require("../services/paidProjectAccess");
 /**
  * PATCH_43: Admin Job Role Controller
  * PATCH_49: Enhanced with notifications for approval/screening unlock
@@ -549,7 +550,8 @@ exports.getJobProjects = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ ok: true, projects });
+    const access = await paidProjectAccess(null, projects.map(project => project._id));
+    res.json({ ok: true, projects: projects.map(project => ({ ...project, marketplaceReserved: access.get(String(project._id)).required })) });
   } catch (err) {
     res.status(500).json({ ok: false, message: err.message });
   }

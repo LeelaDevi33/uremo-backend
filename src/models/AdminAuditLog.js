@@ -31,6 +31,8 @@ const adminAuditLogSchema = new mongoose.Schema({
       "worker_status_change",
       "project_assign",
       "project_unassign",
+      "project_update",
+      "project_delete",
       "screening_create",
       "screening_update",
       "affiliate_withdrawal_approve",

@@ -5,6 +5,8 @@
 
 const express = require("express");
 const router = express.Router();
+const { publicOfferFacts } = require("../controllers/opportunity.controller");
+const { specializationRoles } = require("../services/roleCatalog");
 
 /**
  * GET /api/public/trust
@@ -13,7 +15,7 @@ const router = express.Router();
  */
 router.get("/trust", (_req, res) => {
   res.json({ ok: true, trustSignals: [
-    { id: "free_application", title: "Free applications", description: "Apply directly for a published role." },
+    { id: "free_application", title: "Free applications", description: "Apply directly for an active role." },
     { id: "rental_term", title: "Fixed rental term", description: "See the price and access duration before confirming." },
     { id: "exclusive_sale", title: "Exclusive purchase", description: "An outright purchase closes the listing." },
   ] });
@@ -21,8 +23,7 @@ router.get("/trust", (_req, res) => {
 
 router.get("/categories", async (_req, res, next) => {
   try {
-    const Opportunity = require("../models/Opportunity");
-    const names = await Opportunity.distinct("category", { status: "published", soldAt: null });
+    const { categories: names } = await publicOfferFacts();
     res.json({ ok: true, categories: names.filter(Boolean).map(name => ({ id: name, name })) });
   } catch (err) {
     next(err);
@@ -31,16 +32,15 @@ router.get("/categories", async (_req, res, next) => {
 
 router.get("/stats", async (req, res) => {
   try {
-    const Opportunity = require("../models/Opportunity");
     const WorkPosition = require("../models/WorkPosition");
     const User = require("../models/User");
     const Order = require("../models/Order");
 
     // Get real counts from database
-    const [activeServices, activeJobRoles, totalUsers, completedOrders] =
+    const [offers, roles, totalUsers, completedOrders] =
       await Promise.all([
-        Opportunity.countDocuments({ status: "published", soldAt: null }),
-        WorkPosition.countDocuments({ active: true }),
+        publicOfferFacts(),
+        WorkPosition.find({ active: true }).select("title category serviceId").lean().then(roles => specializationRoles(roles)),
         User.countDocuments({ role: { $ne: "admin" } }),
         Order.countDocuments({ status: "completed" }),
       ]);
@@ -48,9 +48,9 @@ router.get("/stats", async (req, res) => {
     res.json({
       ok: true,
       stats: {
-        activeOpportunities: activeServices,
-        activeServices,
-        activeJobRoles,
+        activeOpportunities: offers.count,
+        activeServices: offers.count,
+        activeJobRoles: roles.length,
         totalUsers,
         completedOrders,
       },

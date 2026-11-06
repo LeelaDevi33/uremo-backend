@@ -12,6 +12,8 @@ const Screening = require("../models/Screening");
 const Project = require("../models/Project");
 const User = require("../models/User");
 const WorkPosition = require("../models/WorkPosition");
+const { acquiredProjects } = require("../services/profileProjects");
+const { paidProjectAccess } = require("../services/paidProjectAccess");
 const {
   runAutoValidation,
   applyScreeningQualityImpact,
@@ -87,6 +89,7 @@ exports.getWorkspaceProfile = async (req, res) => {
         // Get assigned projects for this application
         const assignedProjects = await Project.find({
           assignedTo: req.user.id,
+          workPositionId: app.position?._id || null,
           status: { $in: ["assigned", "in_progress"] },
         })
           .select("title description payRate payType deadline status")
@@ -95,6 +98,7 @@ exports.getWorkspaceProfile = async (req, res) => {
         // Get completed projects
         const completedProjects = await Project.find({
           assignedTo: req.user.id,
+          workPositionId: app.position?._id || null,
           status: "completed",
         })
           .select("title payRate earningsCredited completedAt")
@@ -492,7 +496,11 @@ exports.getMyProjects = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ projects });
+    const states = await paidProjectAccess(null, projects.map(p => p._id));
+    res.set("Cache-Control", "private, no-store").json({
+      projects: projects.filter(p => !states.get(String(p._id))?.required),
+      acquiredProjects: await acquiredProjects(req.user.id),
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -504,6 +512,14 @@ exports.getMyProjects = async (req, res) => {
  */
 exports.getProject = async (req, res) => {
   try {
+    if (!require("mongoose").isObjectIdOrHexString(req.params.id)) return res.status(404).json({ message: "Project not found" });
+    res.set("Cache-Control", "private, no-store");
+    const state = (await paidProjectAccess(req.user.id, [req.params.id])).get(req.params.id.toLowerCase());
+    if (state?.required) {
+      const records = state.active ? await acquiredProjects(req.user.id, req.params.id) : [];
+      if (!records.length) return res.status(404).json({ message: "No active project access in this profile." });
+      return res.json({ acquiredProject: records[0] });
+    }
     const project = await Project.findOne({
       _id: req.params.id,
       assignedTo: req.user.id,
@@ -1578,7 +1594,8 @@ exports.adminGetProjects = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ projects });
+    const reserved = await paidProjectAccess(null, projects.map(p => p._id));
+    res.json({ projects: projects.map(p => ({ ...p, marketplaceReserved: reserved.get(String(p._id))?.required === true })) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1741,6 +1758,7 @@ exports.adminGetProjectById = async (req, res) => {
     const proofs = await ProofOfWork.find({ projectId: project._id })
       .populate("workerId", identity).populate("jobRoleId", roleFields).populate("reviewedBy", identity)
       .sort({ createdAt: -1 }).lean();
+    project.marketplaceReserved = (await paidProjectAccess(null, [project._id])).get(String(project._id))?.required === true;
 
     res.json({
       success: true,
@@ -1793,26 +1811,20 @@ exports.adminUpdateProject = async (req, res) => {
         if (cancelAssignment) await ApplyWork.updateOne({ user: record.assignedTo, currentProject: record._id },
           { $set: { currentProject: null, workerStatus: "ready_to_work" } }, { session });
       }
+      const previousState = { status: record.status, payRate: record.payRate, payType: record.payType, priority: record.priority };
       const changes = { title, description, category, instructions, deliverables, payRate, payType, estimatedTasks,
         deadline: deadline === "" ? null : deadline, status, priority, screeningId: screeningId === "" ? null : screeningId,
         screeningIds, projectType, datasetId: datasetId === "" ? null : datasetId, rewardPerTask };
       for (const [key, value] of Object.entries(changes)) if (value !== undefined) record.set(key, value);
       await record.save({ session });
+      await require("../services/adminAudit.service").logAdminAction({
+        adminId: req.user.id, adminEmail: req.user.email, action: "project_update", entityType: "project",
+        entityId: String(record._id), previousState,
+        newState: { status: record.status, payRate: record.payRate, payType: record.payType, priority: record.priority },
+        metadata: { fields: Object.keys(changes).filter(k => changes[k] !== undefined) },
+      }, { session, required: true });
       return record;
     });
-
-    // Log admin action
-    try {
-      const { logAdminAction } = require("../services/adminAudit.service");
-      await logAdminAction(
-        req.user.id,
-        "PROJECT_UPDATED",
-        `Updated project: ${project.title}`,
-        { projectId: project._id, changes: req.body },
-      );
-    } catch (logErr) {
-      console.warn("[WORKSPACE] Audit log failed:", logErr.message);
-    }
 
     res.json({
       success: true,
@@ -1850,28 +1862,22 @@ exports.adminDeleteProject = async (req, res) => {
       });
     }
 
-    const removed = await Project.findOneAndDelete({ _id: req.params.id, status: { $in: ["draft", "open", "cancelled"] }, assignedTo: null });
-    if (!removed) return res.status(409).json({ message: "Assigned or completed projects are kept for history" });
-
-    // Log admin action
-    try {
-      const { logAdminAction } = require("../services/adminAudit.service");
-      await logAdminAction(
-        req.user.id,
-        "PROJECT_DELETED",
-        `Deleted project: ${project.title}`,
-        { projectId: project._id },
-      );
-    } catch (logErr) {
-      console.warn("[WORKSPACE] Audit log failed:", logErr.message);
-    }
+    await Project.db.transaction(async session => {
+      const access = (await paidProjectAccess(null, [project._id], { session })).get(String(project._id));
+      if (access?.required) throw roleError(409, "A project linked to a marketplace offer must be kept for its access records.");
+      const removed = await Project.findOneAndDelete({ _id: req.params.id, status: { $in: ["draft", "open", "cancelled"] }, assignedTo: null }, { session });
+      if (!removed) throw roleError(409, "Assigned or completed projects are kept for history");
+      await require("../services/adminAudit.service").logAdminAction({ adminId: req.user.id, adminEmail: req.user.email,
+        action: "project_delete", entityType: "project", entityId: String(removed._id), previousState: { title: removed.title, status: removed.status },
+      }, { session, required: true });
+    });
 
     res.json({
       success: true,
       message: "Project deleted successfully",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message });
   }
 };
 

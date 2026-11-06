@@ -10,6 +10,10 @@ const schema = new Schema({
   deliverable: { type: String, trim: true, maxlength: 8000, default: "", select: false },
   applyEnabled: { type: Boolean, default: false },
   workPositionId: { type: Schema.Types.ObjectId, ref: "WorkPosition", default: null },
+  // The historical unique role index can remain in place during a rolling
+  // migration. New offers link to a specific project, sharing its specialization.
+  projectId: { type: Schema.Types.ObjectId, ref: "Project", default: null },
+  projectRoleId: { type: Schema.Types.ObjectId, ref: "WorkPosition", default: null },
   rentEnabled: { type: Boolean, default: false },
   rentPrice: { type: Number, min: 0, default: 0 },
   rentalDays: { type: Number, min: 0, max: 365, default: 0 },
@@ -17,6 +21,7 @@ const schema = new Schema({
   buyPrice: { type: Number, min: 0, default: 0 },
   currency: { type: String, enum: ["USD"], default: "USD" },
   firstPublishedAt: Date,
+  projectPublishedAt: Date,
   preserveRoleUntilPublished: { type: Boolean, default: false, select: false },
   soldAt: { type: Date, default: null },
   rentedUntil: { type: Date, default: null },
@@ -24,5 +29,6 @@ const schema = new Schema({
 }, { timestamps: true });
 
 schema.index({ workPositionId: 1 }, { unique: true, partialFilterExpression: { workPositionId: { $type: "objectId" } } });
+schema.index({ projectId: 1 }, { unique: true, partialFilterExpression: { projectId: { $type: "objectId" } } });
 schema.index({ status: 1, soldAt: 1, createdAt: -1 });
 module.exports = mongoose.model("Opportunity", schema);

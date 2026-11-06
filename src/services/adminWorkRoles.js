@@ -36,7 +36,7 @@ async function removeRole(id, expectedRevision) {
     // Every opportunity link and application also touches the role, so a
     // concurrent reference or deletion must retry before either can commit.
     await WorkPosition.deleteOne({ _id: id }, { session });
-    for (const [model, filter] of [[Opportunity,{ workPositionId: id }], [ApplyWork,{ position: id }],
+    for (const [model, filter] of [[Opportunity,{ $or: [{ workPositionId: id }, { projectRoleId: id }] }], [ApplyWork,{ position: id }],
       [Project,{ workPositionId: id }], [ProofOfWork,{ jobRoleId: id }], [Service,{ linkedJobId: id }]]) {
       if (await model.exists(filter).session(session)) throw roleError(409, "This role has linked records. Deactivate it to preserve its history.");
     }

@@ -3,6 +3,8 @@ const { Schema } = mongoose;
 
 const schema = new Schema({
   opportunityId: { type: Schema.Types.ObjectId, ref: "Opportunity", required: true },
+  projectId: { type: Schema.Types.ObjectId, ref: "Project" },
+  workPositionId: { type: Schema.Types.ObjectId, ref: "WorkPosition" },
   userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
   type: { type: String, enum: ["buy", "rent"], required: true },
   requestId: { type: String, required: true },
@@ -20,4 +22,5 @@ const schema = new Schema({
 schema.index({ userId: 1, requestId: 1 }, { unique: true });
 schema.index({ userId: 1, opportunityId: 1, startsAt: -1 });
 schema.index({ opportunityId: 1, type: 1 }, { unique: true, partialFilterExpression: { type: "buy" } });
+schema.index({ projectId: 1, type: 1 }, { unique: true, partialFilterExpression: { type: "buy", projectId: { $type: "objectId" } } });
 module.exports = mongoose.model("OpportunityGrant", schema);

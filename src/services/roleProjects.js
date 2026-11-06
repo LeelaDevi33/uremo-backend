@@ -1,15 +1,19 @@
 const Project = require("../models/Project");
 const ApplyWork = require("../models/ApplyWork");
 const WorkPosition = require("../models/WorkPosition");
+const Opportunity = require("../models/Opportunity");
 const WalletTransaction = require("../models/WalletTransaction");
 const { changeFunds, isWalletAmount } = require("./walletFunds");
 const { roleError } = require("./adminWorkRoles");
 
 function meetsScreenings(worker, project, role) {
   const required = [project.screeningId, ...(project.screeningIds || [])];
-  if (role?.hasScreening) required.push(role.screeningId, ...(role.screeningIds || []));
-  const passed = new Set((worker.screeningsCompleted || []).filter(s => s.passed === true ||
-    s.submissionStatus === "approved").map(s => String(s.screeningId)));
+  if (role?.hasScreening) {
+    if (!role.screeningId && !role.screeningIds?.length) return false;
+    required.push(role.screeningId, ...(role.screeningIds || []));
+  }
+  const passed = new Set((worker.screeningsCompleted || []).filter(s => s.submissionStatus === "approved" ||
+    s.passed === true && !["pending_review", "rejected"].includes(s.submissionStatus)).map(s => String(s.screeningId)));
   return required.filter(Boolean).every(id => passed.has(String(id)));
 }
 
@@ -21,6 +25,7 @@ async function assign(projectId, applicationId, roleId) {
     const project = await Project.findById(projectId).session(session);
     if (!project) throw roleError(404, "Project not found");
     if (project.status !== "open" || project.assignedTo) throw roleError(409, "Only an open, unassigned project can be assigned");
+    if (await Opportunity.exists({ projectId }).session(session)) throw roleError(409, "This project is reserved for marketplace access");
     const worker = await ApplyWork.findById(applicationId).session(session);
     if (!worker) throw roleError(404, "Worker application not found");
     if (roleId && String(worker.position) !== roleId || project.workPositionId && !project.workPositionId.equals(worker.position)) {

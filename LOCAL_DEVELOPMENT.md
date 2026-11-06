@@ -10,7 +10,7 @@ With a local MongoDB replica named `uremoLocal` listening on `127.0.0.1:27347`, 
 npm run preview:marketplace -- --demo
 ```
 
-Open [project opportunities](http://localhost:3137/explore-services) or [admin publishing](http://localhost:3137/admin/opportunities). The API listens on port 5137. The demo option creates a synthetic worker with test credits and a synthetic editor if those accounts are missing. It prints their generated passwords when first created. Existing accounts and completed transactions keep their state when the preview restarts. Sign in again after restarting the API. Use an HTTPS sample resume link to test applications without configuring an upload provider.
+The marketplace has three entrances: [Open Roles](http://localhost:3137/open-roles), [Rent Projects](http://localhost:3137/projects/rent) and [Full Access](http://localhost:3137/projects/full-access). The [admin project offer editor](http://localhost:3137/admin/opportunities) sets the available terms for each identified project. The API listens on port 5137. The demo creates synthetic accounts, three specialized example projects, and a sample worker qualified in accessibility testing. It prints passwords for new synthetic accounts once. Sign in again after restarting the API. Use an HTTPS sample resume link to test role applications without an upload provider.
 
 For a full page audit, serve the optimized build. Stop the development preview first. Run these commands in PowerShell from the backend folder:
 
@@ -52,9 +52,10 @@ Use separate browser profiles for the local demo admin and worker. For tests tha
 
 | In the admin | Check independently |
 | --- | --- |
-| Create a role, set screening order and training, and publish an opportunity with the intended application, rental and buyout options. | A worker can see only the published options. A draft or private handoff is never in the public listing. |
+| Create a specialization role, set screening and training, then apply from Open Roles. | Applying is free. Approval and the required screenings establish eligibility for matching rental projects. |
+| Create a project under its specialization and publish a Rent-only, Full Access-only or combined offer. | The project appears in the corresponding section(s). Any signed-in buyer can buy Full Access. Renting requires qualification in that project's specialization. |
 | Open a listing in two admin tabs, save in the first and then try saving in the second. | The stale tab must prompt for a reload. Compare the stored price, status and handoff with the first save. |
-| Rent from the worker profile and open Access receipts as the admin. | Match the holder, price and term. Editing future terms must not change the renter's original access. A buyout closes the listing; an admin can archive it without undoing the sale. |
+| Acquire a project from a test account and reopen its profile. | The holder sees the project and the handoff from checkout. A rental ends at its expiry. Full Access transfers exclusive rights and closes the sale while the specialization continues accepting applications. Access receipts show the holder, amount and term. |
 | Create a role-linked project with a pay type, rate, priority and both required and optional deliverables. Return to it using the role's project link and edit the checklist. | Assign an eligible synthetic worker and reopen the worker project. The pay, ordered checklist and required markers should match the saved form. An ineligible worker must not be offered. |
 | Follow the withdrawal links from the dashboard and reopen a closed support ticket to read its replies. | Wallet withdrawals and historical referral payouts have separate queues. Replying to a closed ticket leaves the status closed; reopening requires an explicit status change. |
 
@@ -66,6 +67,8 @@ $suite = @(Get-ChildItem scripts -Filter 'test-*.js' | Where-Object { Select-Str
 node --test --test-concurrency=2 @suite
 ```
 
-## Prepare existing roles
+## Review offers created under the previous model
 
-Review the specific active roles your team can offer. On a local restored copy, run `node scripts/prepare-opportunity-drafts.js --help` for the expected inputs. Preview the selected role IDs and category map before using `--write`. Imports produce application-only drafts. A publisher supplies the description, confirms project rights, and sets any rental or buyout terms before publication. The preview and importer each select a local database explicitly.
+On a restored local copy, run `node scripts/review-project-offers.js --db LOCAL_DATABASE --port 27347` to count offers that need review and historical receipts lacking a project association. The command reads counts only. The old role-to-offer import command is retired.
+
+Review historical offers in Admin. For an unsettled offer, identify its actual project and save a draft before publishing new access terms. Keep settled legacy receipts and their original handoffs. Create a fresh offer for a separately verified project when appropriate. A role or a matching title alone cannot establish the identity of a purchased project. Verify the unique project-offer and exclusive-sale indexes on the restored copy before releasing.

@@ -21,7 +21,7 @@ exports.overview = async (_req, res, next) => {
       pendingProofs, pendingApplications, invalidScreenings, projects, datasets,
       approvedSubmissions, pendingReviews, users, walletWithdrawals, referralWithdrawals, pendingTopups,
     ] = await Promise.all([
-      Opportunity.countDocuments({ status: "published", rightsConfirmed: true, soldAt: null }),
+      require("./opportunity.controller").publicOfferFacts().then(facts => facts.count),
       Opportunity.countDocuments({ status: "draft" }),
       Grant.countDocuments({ type: "rent", endsAt: { $gt: now } }),
       Grant.countDocuments({ type: "buy" }),

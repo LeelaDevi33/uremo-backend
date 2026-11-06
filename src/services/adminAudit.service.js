@@ -36,10 +36,10 @@ async function logAdminAction({
   newState,
   reason,
   metadata,
-}) {
+}, { session, required = false } = {}) {
   try {
-    const actorEmail = adminEmail || (await User.findById(adminId).select("email").lean())?.email;
-    await AdminAuditLog.create({
+    const actorEmail = adminEmail || (await User.findById(adminId).select("email").session(session || null).lean())?.email;
+    await new AdminAuditLog({
       adminId,
       adminEmail: actorEmail,
       action,
@@ -50,8 +50,9 @@ async function logAdminAction({
       reason,
       metadata,
       timestamp: new Date(),
-    });
+    }).save({ session });
   } catch (err) {
+    if (required) throw err;
     // Log to console but don't fail the action
     console.error("[AdminAudit] Failed to log action:", {
       action,

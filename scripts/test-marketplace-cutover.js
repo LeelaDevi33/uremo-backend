@@ -93,7 +93,12 @@ test("marketplace cutover preserves history and reports only settled project rev
     const WalletWithdrawal = require("../src/models/WithdrawalRequest");
     const AffiliateWithdrawal = require("../src/models/AffiliateWithdrawal");
     const start = new Date(), end = new Date(start.getTime() + 3600000);
+    const roleId = new mongoose.Types.ObjectId(), projectId = new mongoose.Types.ObjectId();
+    await require("../src/models/WorkPosition").collection.insertOne({ _id: roleId, active: true, title: "Research", category: "research" });
+    await require("../src/models/Project").collection.insertOne({ _id: projectId, workPositionId: roleId, status: "open", title: "Interview study" });
     await Opportunity.collection.insertMany([
+      { status:"published", projectId, projectRoleId:roleId, projectPublishedAt:start, applyEnabled:false, rightsConfirmed:true,
+        currency:"USD", buyEnabled:true, buyPrice:30, title:"Interview study" },
       { status: "published", rightsConfirmed: true }, { status: "published", rightsConfirmed: true, soldAt: start },
       { status: "draft" }, { status: "published", rightsConfirmed: false },
     ]);
@@ -132,5 +137,44 @@ test("marketplace cutover preserves history and reports only settled project rev
     }
     assert.equal((await Method.findById(method.id)).active, false);
     assert.equal(await Method.countDocuments(), 1);
+  });
+  await t.test("project edits and deletions write an attributable audit event with the database change", async () => {
+    const Project = require("../src/models/Project"), Log = require("../src/models/AdminAuditLog");
+    const p = await Project.create({ title:"Ordinary project", category:"design", status:"open", payRate:14 });
+    const path = "/admin/workspace/project/" + p.id;
+    assert.equal((await request(path,"PUT",editor,{ payRate:34, priority:"urgent" })).status,200);
+    assert.ok(await Log.exists({ entityId:p.id, adminId:editor, action:"project_update", "previousState.payRate":14, "newState.payRate":34 }));
+    assert.equal((await request(path,"DELETE",editor)).status,200);
+    assert.ok(await Log.exists({ entityId:p.id, adminId:editor, action:"project_delete", "previousState.title":"Ordinary project" }));
+  });
+  await t.test("settled access reaches the buyer's profile, never another user's workspace or payroll", async () => {
+    const Project = require("../src/models/Project"), Role = require("../src/models/WorkPosition"), Opportunity = require("../src/models/Opportunity");
+    await User.updateOne({ _id:worker },{ $set:{ walletBalance:200,withdrawable:0 } });
+    const role = await Role.create({ title:"Audio editing",category:"other",active:true });
+    const project = await Project.create({ title:"Podcast edit",workPositionId:role._id,category:"other",status:"open",payRate:0 });
+    const offer = await Opportunity.create({ projectId:project._id,projectRoleId:role._id,status:"published",title:project.title,
+      buyEnabled:true,buyPrice:42,rentEnabled:true,rentPrice:4,rentalDays:3,description:"Scope at sale",deliverable:"Private instructions at sale",
+      rightsConfirmed:true,projectPublishedAt:new Date(),category:"other" });
+    const view="/workspace/project/"+project.id, pay="/opportunities/"+offer.id;
+    assert.equal((await request(view)).status,404);
+    assert.equal((await request(pay+"/rent","POST",worker,{ requestId:randomUUID(),expectedAmount:4,expectedRentalDays:3 })).status,403);
+    const paid = await request(pay+"/buy","POST",worker,{ requestId:randomUUID(),expectedAmount:42 });
+    assert.ok(paid.ok, await paid.text());
+    await Opportunity.updateOne({ _id:offer._id },{ $set:{ deliverable:"Changed future instructions" } });
+    const list=await (await request("/workspace/projects")).json(), detail=await (await request(view)).json();
+    assert.equal(list.acquiredProjects[0]._id,project.id);
+    assert.ok(!JSON.stringify(list).includes("Private instructions"));
+    assert.equal(detail.acquiredProject.handoff,"Private instructions at sale");
+    assert.equal(detail.acquiredProject.accessType,"buy");
+    assert.equal((await request(view,"GET",editor)).status,404);
+    assert.equal((await request(view+"/start","POST",worker,{})).status,403);
+    assert.equal((await request(view+"/rlhf-tasks")).status,403);
+    assert.equal((await request("/admin/workspace/project/"+project.id,"DELETE",editor)).status,409);
+    assert.ok(await Project.exists({ _id: project.id, assignedTo: null }), "Checkout does not create a staffing assignment");
+    // Model an expired rental on another project; no handoff should be recoverable via the direct URL.
+    const second = await Project.create({ title:"Voice cleanup",workPositionId:role._id,category:"other",status:"open",payRate:0 });
+    const other = await Opportunity.create({ projectId:second._id,projectRoleId:role._id });
+    await Grant.collection.insertOne({ userId:worker,projectId:second._id,opportunityId:other._id,requestId:randomUUID(),type:"rent",startsAt:new Date(1),endsAt:new Date(2),deliverable:"Expired private data" });
+    assert.equal((await request("/workspace/project/"+second.id)).status,404);
   });
 });

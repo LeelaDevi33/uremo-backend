@@ -7,6 +7,8 @@ const Opportunity = require("../src/models/Opportunity");
 const Grant = require("../src/models/OpportunityGrant");
 const Wallet = require("../src/models/WalletTransaction");
 const User = require("../src/models/User");
+const Project = require("../src/models/Project");
+const { paidProjectAccess } = require("../src/services/paidProjectAccess");
 const Role = require("../src/models/WorkPosition");
 const ApplyWork = require("../src/models/ApplyWork");
 const Order = require("../src/models/Order");
@@ -50,14 +52,20 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     rentPrice: 4.25, buyEnabled: true, buyPrice: 25, deliverable: "PRIVATE-" + randomUUID() };
   const terms = type => type === "rent" ? { requestId: randomUUID(), expectedAmount: 4.25, expectedRentalDays: 3 } :
     { requestId: randomUUID(), expectedAmount: 25 };
-  async function create(extra) {
-    const result = await req(adminApi, admin, "POST", { ...offer, ...extra });
+  const makeRole = () => Role.create({ title: "QA role", category: "Design", active: true });
+  const mainRole = await makeRole();
+  await ApplyWork.create({ position: mainRole._id, user: renter._id, status: "approved", workerStatus: "working",
+    currentProject: new mongoose.Types.ObjectId() });
+  const makeProject = (role = mainRole, fields = {}) => Project.create({ title: "Scoped project", description: "Private brief",
+    workPositionId: role._id, category: role.category, status: "open", payRate: 0, ...fields });
+  async function create(extra = {}) {
+    const projectId = extra.projectId || (await makeProject())._id;
+    const result = await req(adminApi, admin, "POST", { ...offer, ...extra, projectId });
     assert.equal(result.status, 201, JSON.stringify(result));
     return result.opportunity;
   }
   const charge = (item, user, mode, body = terms(mode)) => req(api + "/" + item._id + "/" + mode, user, "POST", body);
   const access = (item, user) => req(api + "/" + item._id + "/access", user);
-  const makeRole = async () => Role.create({ title: "QA role", category: "Design", active: true, serviceId: new mongoose.Types.ObjectId() });
 
   await t.test("every historical and current listing revision guards its full editor and status actions", async () => {
     const item = await create({});
@@ -117,7 +125,7 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await req("/apply-work/admin/" + application._id, admin, "PUT", { status: "approved" })).workerStatus, "working");
     assert.equal((await req(settings + "/reject", admin, "PUT", { applicantId: application._id })).status, 409);
     assert.equal((await req(settings + "/unlock-screening", admin, "PUT", { applicantId: application._id })).status, 409);
-    const linked = await create({ workPositionId: role._id, applyEnabled: true });
+    const linked = await create({ projectId: (await makeProject(role))._id });
     assert.equal((await req(path, admin, "DELETE", { expectedRevision: screened.job.revision })).status, 409);
     assert.equal((await req(path, admin, "PUT", { active: false })).status, 200);
     assert.equal((await req(api + "/" + linked._id)).opportunity.applyEnabled, false);
@@ -247,13 +255,13 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
   await t.test("admin drafts, private/public field boundaries, category, terms and publication checks", async () => {
     assert.equal((await req(adminApi)).status, 401);
     assert.equal((await req(adminApi, buyer)).status, 403);
-    const draft = await req(adminApi, admin, "POST", { status: "draft" });
+    const draft = await req(adminApi, admin, "POST", { status: "draft", projectId: (await makeProject())._id });
     assert.equal(draft.status, 201);
     assert.equal((await req(api + "/" + draft.opportunity._id)).status, 404);
     for (const change of [{ rightsConfirmed: false }, { category: "forex_crypto" }, { rentPrice: 1.001 },
          { rentalDays: 0 }, { deliverable: "" }, { workPositionId: new mongoose.Types.ObjectId(), applyEnabled: true },
          { soldAt: new Date() }]) {
-      const invalid = await req(adminApi, admin, "POST", { ...offer, ...change });
+      const invalid = await req(adminApi, admin, "POST", { ...offer, projectId: (await makeProject())._id, ...change });
       assert.equal(invalid.status, 400, JSON.stringify(invalid));
     }
     const item = await create({});
@@ -286,7 +294,7 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     const before = await readBalance(small);
     assert.equal((await charge(item, null, "buy")).status, 401);
     assert.equal((await charge(item, small, "buy")).status, 402);
-    assert.equal((await charge(item, buyer, "rent", { ...terms("rent"), expectedRentalDays: 2 })).status, 409);
+    assert.equal((await charge(item, renter, "rent", { ...terms("rent"), expectedRentalDays: 2 })).status, 409);
     assert.equal((await charge(item, buyer, "buy", { ...terms("buy"), expectedAmount: 10 })).status, 409);
     assert.equal(await readBalance(small), before);
     assert.equal((await req(api + "/" + item._id)).opportunity.availability, "available");
@@ -308,10 +316,14 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal(await Wallet.countDocuments({ referenceId: grantId, source: "service_purchase", status: "success" }), 1);
     assert.equal((await access(item, buyer)).deliverable, offer.deliverable);
     assert.equal((await access(item, other)).status, 403);
+    // The immutable receipt still closes the project if a historical repair
+    // removed the mutable sold marker.
+    await Opportunity.updateOne({ _id: item._id }, { soldAt: null });
     assert.equal((await charge(item, other, "buy")).status, 409);
     assert.equal((await charge(item, other, "rent")).status, 409);
     assert.equal((await req(api + "/" + item._id)).opportunity.availability, "sold");
     assert.equal((await req(api)).opportunities.some(r => r._id === item._id), false);
+    await Opportunity.updateOne({ _id: item._id }, { soldAt: new Date() });
     assert.equal((await updateListing(item, { status: "published" })).status, 409);
     assert.equal((await updateListing(item, { status: "archived" })).status, 200);
     assert.equal((await access(item, buyer)).status, 200);
@@ -340,62 +352,136 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal(await Grant.countDocuments({ userId: other._id, requestId: attempt.requestId }), 1);
   });
 
-  await t.test("both application endpoints reject unpublished and archived work; duplicate concurrent applications share one admission", async () => {
+  await t.test("work roles remain free to apply after sale and legacy product roles stay hidden", async () => {
     const role = await makeRole();
-    const item = await create({ workPositionId: role._id, applyEnabled: true, status: "draft" });
-    const legacy = { positionId: String(role._id), resumeUrl: "https://example.test/resume" };
-    for (const state of ["draft", "published", "archived"]) {
-      const changed = await updateListing(item, { status: state });
-      assert.equal(changed.status, 200);
-      const work = "/workspace/apply/" + role._id;
-      if (state === "published") {
-        const pair = await Promise.all([req(work, applicant, "POST", {}), req("/apply-work", applicant, "POST", legacy)]);
-        assert.deepEqual(pair.map(r => r.status).sort(), [201,409]);
-      } else {
-        assert.equal((await req(work, other, "POST", {})).status, 409);
-        assert.equal((await req("/apply-work", other, "POST", legacy)).status, 409);
-        assert.equal((await req("/work-positions/by-service/" + role.serviceId)).status, 404);
-      }
+    const item = await create({ projectId: (await makeProject(role))._id });
+    assert.equal((await charge(item, buyer, "buy")).status, 201);
+    const apply = user => req("/apply-work", user, "POST", { positionId: role._id, resumeUrl: "https://example.invalid/cv" });
+    const start = await readBalance(applicant);
+    assert.deepEqual((await Promise.all([apply(applicant), req("/workspace/apply/" + role._id, applicant, "POST", {})])).map(r => r.status).sort(), [201,409]);
+    assert.equal(await readBalance(applicant), start);
+    assert.equal((await access(item, applicant)).status, 403);
+    const custom = await Role.create({ title: "Financial analyst", category: "Finance research" });
+    const retired = await Role.create({ title: "Legacy catalog fixture", category: "forex_accounts" });
+    const source = await Service.collection.insertOne({ title: "Retired", category: "banks_gateways_wallets", slug: randomUUID() });
+    const backed = await Role.create({ title: "Misleading label", category: "design", serviceId: source.insertedId });
+    const listed = Object.values(await req("/work-positions")).map(row => row?._id);
+    const adminRoles = Object.values(await req("/admin/work-positions", admin)).filter(row => row?._id);
+    assert.equal(adminRoles.find(row => row._id === String(custom._id)).isSpecialization, true);
+    assert.ok(listed.includes(String(role._id)) && listed.includes(String(custom._id)));
+    for (const blocked of [backed, retired]) {
+      assert.equal(adminRoles.find(row => row._id === String(blocked._id)).isSpecialization, false);
+      assert.ok(!listed.includes(String(blocked._id)));
+      assert.equal((await req("/workspace/apply/" + blocked._id, other, "POST", {})).status, 404);
+      assert.equal((await req("/apply-work", other, "POST", { positionId: blocked._id, resumeUrl: "https://example.invalid/cv" })).status, 404);
+      assert.equal((await req(adminApi, admin, "POST", { ...offer, projectId: (await makeProject(blocked))._id })).status, 400);
     }
-    assert.equal(await ApplyWork.countDocuments({ position: role._id }), 1);
+    assert.equal((await req("/work-positions/by-service/" + backed.serviceId)).status, 404);
+    await Role.updateOne({ _id: role._id }, { active: false });
+    assert.equal((await apply(other)).status, 400);
   });
 
-  await t.test("rental snapshots, time-bound access, free applications and closure on exclusive sale", async () => {
-    const role = await makeRole();
-    const item = await create({ workPositionId: String(role._id), applyEnabled: true });
-    assert.equal((await req(adminApi, admin, "POST", { ...offer, workPositionId: role._id })).status, 409);
-    assert.equal((await updateListing(item, { workPositionId: null })).status, 409);
+  await t.test("public briefs, qualified specialization rental, independent full access, snapshots and expiry", async () => {
+    const role = await makeRole(), one = new mongoose.Types.ObjectId(), two = new mongoose.Types.ObjectId();
+    await Role.updateOne({ _id: role._id }, { hasScreening: true, screeningId: one });
+    const project = await makeProject(role, { screeningIds: [two] });
+    const item = await create({ projectId: project._id });
+    assert.deepEqual([item.kind, item.needsReview, item.projectId, item.workPositionId, item.applyEnabled],
+      ["project", false, String(project._id), String(role._id), false]);
+    const detail = async user => (await req(api + "/" + item._id, user)).opportunity;
+    const anon = await detail();
+    assert.deepEqual([anon.canRent, anon.canBuy, anon.projectTitle, anon.workPositionTitle], [false, false, project.title, role.title]);
+    assert.equal((await detail(other)).canBuy, true);
+    const before = await readBalance(renter);
+    const application = await ApplyWork.create({ user: renter._id, position: role._id, status: "pending", workerStatus: "assigned",
+      currentProject: new mongoose.Types.ObjectId(), screeningsCompleted: [{ screeningId: one, passed: true }, { screeningId: two, passed: true }] });
+    const denied = async () => {
+      assert.equal((await detail(renter)).canRent, false);
+      assert.equal((await charge(item, renter, "rent")).status, 403);
+      assert.equal(await readBalance(renter), before);
+    };
+    await denied(); // Approval in another specialization does not qualify this worker.
+    await ApplyWork.updateOne({ _id: application._id }, { status: "approved", "screeningsCompleted.1.submissionStatus": "rejected" });
+    await denied();
+    await ApplyWork.updateOne({ _id: application._id }, { workerStatus: "suspended", "screeningsCompleted.1.submissionStatus": "approved" });
+    await denied();
+    await ApplyWork.updateOne({ _id: application._id }, { workerStatus: "working" });
+    assert.equal((await detail(renter)).canRent, true);
     const rented = await charge(item, renter, "rent");
     assert.equal(rented.status, 201, JSON.stringify(rented));
-    assert.equal(new Date(rented.grant.endsAt) - new Date(rented.grant.startsAt), 3 * 86400000);
+    assert.deepEqual([rented.grant.projectId, rented.grant.workPositionId], [String(project._id), String(role._id)]);
+    const gate = async user => (await paidProjectAccess(user._id, [project._id])).get(String(project._id));
+    assert.equal((await gate(renter)).state, "rented");
+    assert.equal((await gate(buyer)).active, false);
+    assert.equal((await detail(buyer)).canBuy, false);
     assert.equal((await charge(item, buyer, "buy")).status, 409);
-    assert.equal((await charge(item, other, "rent")).status, 409);
-    const edit = await updateListing(item, { deliverable: "REPLACEMENT-PRIVATE" });
-    assert.equal(edit.status, 200);
+    await updateListing(item, { deliverable: "REPLACEMENT-PRIVATE" });
     assert.equal((await access(item, renter)).deliverable, offer.deliverable);
-    const before = await readBalance(applicant);
-    const application = await req("/workspace/apply/" + role._id, applicant, "POST", {});
-    assert.equal(application.status, 201, JSON.stringify(application));
-    assert.equal(await readBalance(applicant), before);
-    assert.equal((await access(item, applicant)).status, 403);
-    const legacyApplication = { positionId: String(role._id), resumeUrl: "https://example.test/resume" };
-    assert.equal((await req("/apply-work", applicant, "POST", legacyApplication)).status, 409);
-    // Advance only synthetic fixture dates to the past, without relying on a timer or a cron job.
     const expired = new Date(Date.now() - 1);
-    await Grant.updateOne({ _id: rented.grant._id }, { $set: { endsAt: expired, startsAt: new Date(Date.now()-86400000) } });
-    await Opportunity.updateOne({ _id: item._id }, { $set: { rentedUntil: expired } });
+    await Grant.updateOne({ _id: rented.grant._id }, { endsAt: expired, startsAt: new Date(Date.now()-86400000) });
+    await Opportunity.updateOne({ _id: item._id }, { rentedUntil: expired });
     assert.equal((await access(item, renter)).status, 403);
-    const expiredGrant = (await req(api + "/mine", renter)).grants.find(g => g._id === rented.grant._id);
-    assert.equal(expiredGrant.active, false);
-    assert.equal((await req(api + "/" + item._id)).opportunity.availability, "available");
+    assert.equal((await gate(renter)).state, "expired");
     assert.equal((await charge(item, buyer, "buy")).status, 201);
+    assert.equal((await gate(buyer)).state, "owned");
     assert.equal((await access(item, buyer)).deliverable, "REPLACEMENT-PRIVATE");
-    assert.equal((await req("/workspace/apply/" + role._id, other, "POST", {})).status, 409);
-    assert.equal((await req("/apply-work", other, "POST", legacyApplication)).status, 409);
-    assert.equal((await req("/work-positions/by-service/" + role.serviceId)).status, 404);
-    const positions = await req("/work-positions");
-    assert.equal(Object.values(positions).some(x => x?._id === String(role._id)), false);
-    assert.equal(await ApplyWork.countDocuments({ position: role._id }), 1);
+    assert.equal((await Project.findById(project._id)).assignedTo, undefined);
+    assert.equal(await ApplyWork.countDocuments({ user: buyer._id, position: role._id }), 0);
+  });
+
+  await t.test("legacy listings fail closed while prior receipts retain access and replays", async () => {
+    const role = await makeRole();
+    const legacy = await Opportunity.create({ ...offer, workPositionId: role._id, applyEnabled: true, firstPublishedAt: new Date() });
+    const spare = await makeProject();
+    const convert = { status: "draft", projectId: spare._id, applyEnabled: false };
+    assert.equal((await req(api + "/" + legacy._id)).status, 404);
+    assert.equal((await charge(legacy, buyer, "buy")).status, 404);
+    assert.equal((await req(api)).opportunities.some(r => r._id === String(legacy._id)), false);
+    assert.equal((await req(adminApi + "/" + legacy._id, admin)).opportunity.canConvert, true);
+    assert.equal((await updateListing(legacy, { status: "published" })).status, 409);
+    const prior = await Grant.create({ opportunityId: legacy._id, userId: other._id, type: "buy", requestId: randomUUID(),
+      title: "Earlier sale", deliverable: "Historical handoff", amount: 25, startsAt: new Date(), balanceAfter: 100 });
+    assert.equal((await req(adminApi + "/" + legacy._id, admin)).opportunity.canConvert, false);
+    assert.equal((await updateListing(legacy, convert)).status, 409);
+    assert.equal((await access(legacy, other)).deliverable, "Historical handoff");
+    assert.equal((await charge(legacy, other, "buy", { expectedAmount: 25, requestId: prior.requestId })).replayed, true);
+    assert.equal((await access(legacy, buyer)).status, 403);
+    assert.equal((await updateListing(legacy, { status: "archived" })).status, 200);
+    const fixable = await Opportunity.create({ ...offer, applyEnabled: true });
+    const fixed = await updateListing(fixable, convert);
+    assert.equal(fixed.status, 200);
+    assert.deepEqual([fixed.opportunity.status, fixed.opportunity.kind, fixed.opportunity.firstPublishedAt], ["draft", "project", null]);
+    assert.equal((await req(api + "/" + fixable._id)).status, 404);
+    assert.equal((await updateListing(fixable, { status: "published" })).status, 200);
+    assert.equal((await req(api + "/" + fixable._id)).status, 200);
+  });
+
+  await t.test("project identity, exclusive staffing and per-project inventory survive competing admins", async () => {
+    const role = await makeRole();
+    const project = await makeProject(role), another = await makeProject(role);
+    const createAt = (id, extra = {}) => req(adminApi, admin, "POST", { ...offer, projectId: id, ...extra });
+    assert.equal((await createAt(project._id, { workPositionId: mainRole._id })).status, 400);
+    assert.equal((await createAt(project._id, { applyEnabled: true })).status, 400);
+    assert.equal((await req(adminApi, admin, "POST", offer)).status, 400);
+    const pair = await Promise.all([createAt(project._id), createAt(project._id)]);
+    assert.deepEqual(pair.map(v => v.status).sort(), [201,409]);
+    const item = pair.find(v => v.status === 201).opportunity;
+    assert.equal((await createAt(another._id, { rentEnabled: false })).status, 201);
+    assert.equal((await updateListing(item, { projectId: another._id })).status, 409);
+    const candidate = await ApplyWork.create({ user: applicant._id, position: role._id, status: "approved", workerStatus: "ready_to_work" });
+    const assign = p => req("/admin/workspace/project/" + p._id + "/assign", admin, "PUT", { workerId: candidate._id });
+    assert.equal((await assign(project)).status, 409);
+    assert.equal((await updateListing(item, { status: "archived" })).status, 200);
+    assert.equal((await assign(project)).status, 409);
+    const race = await makeProject(role);
+    const [assignment, offerResult] = await Promise.all([assign(race), createAt(race._id)]);
+    assert.ok((assignment.status === 200 && offerResult.status === 400) || (assignment.status === 409 && offerResult.status === 201));
+    const held = await Project.findById(race._id).lean();
+    assert.notEqual(Boolean(held.assignedTo), Boolean(await Opportunity.exists({ projectId: race._id })));
+    const staffed = await makeProject(role, { assignedTo: applicant._id, status: "in_progress" });
+    assert.equal((await createAt(staffed._id)).status, 400);
+    const publicRoles = await req("/admin/workspace/job/" + role._id + "/projects", admin);
+    assert.equal(publicRoles.projects.find(p => p._id === item.projectId).marketplaceReserved, true);
   });
 
   await t.test("previous applications are scoped to the user and chosen role, and both forms accept only HTTPS resume links", async () => {
@@ -415,63 +501,6 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await lookup(first, other))._id, undefined);
     assert.equal((await req("/apply-work/me", applicant)).position._id, String(second._id));
     assert.equal((await req("/apply-work/me?positionId=invalid", applicant)).status, 400);
-  });
-
-  await t.test("a migration-only draft preserves an existing open role until the admin archives or publishes it", async () => {
-    for (const transition of ["archived", "published"]) {
-      const role = await makeRole();
-      const item = await Opportunity.create({ ...offer, workPositionId: role._id, status: "draft", applyEnabled: true,
-        preserveRoleUntilPublished: true });
-      const legacy = "/work-positions/by-service/" + role.serviceId;
-      assert.equal((await req(legacy)).status, 200);
-      assert.equal((await req(api + "/" + item._id)).status, 404);
-      assert.equal((await req("/workspace/apply/" + role._id, applicant, "POST", {})).status, 201);
-      assert.equal((await req("/apply-work", renter, "POST", { positionId: role._id, resumeUrl: "https://example.invalid/cv" })).status, 201);
-      assert.equal((await updateListing(item, { status: transition })).status, 200);
-      assert.equal((await updateListing(item, { status: "draft" })).status, 200);
-      assert.equal((await req(legacy)).status, 404);
-      assert.equal((await req("/workspace/apply/" + role._id, other, "POST", {})).status, 409);
-      assert.equal((await updateListing(item, { preserveRoleUntilPublished: true })).status, 400);
-    }
-  });
-
-  await t.test("a deactivated role hides Apply on list and detail while administrators can see the configured role", async () => {
-    const role = await makeRole();
-    const item = await create({ applyEnabled: true, workPositionId: role._id });
-    const detail = () => req(api + "/" + item._id);
-    assert.equal((await detail()).opportunity.applyEnabled, true);
-    await Role.updateOne({ _id: role._id }, { $set: { active: false } });
-    assert.equal((await detail()).opportunity.applyEnabled, false);
-    assert.equal((await req(api)).opportunities.find(x => x._id === item._id).applyEnabled, false);
-    const configured = (await req(adminApi + "/" + item._id, admin)).opportunity;
-    assert.equal(configured.applyEnabled, true);
-    assert.equal(configured.workPositionId, String(role._id));
-    assert.equal((await req("/workspace/apply/" + role._id, applicant, "POST", {})).status, 400);
-  });
-
-  await t.test("an application racing a sale cannot commit after that sale", async t => {
-    const role = await makeRole();
-    const item = await create({ applyEnabled: true, workPositionId: role._id });
-    let signalSaleWrite, releaseCommit;
-    const wroteSale = new Promise(resolve => { signalSaleWrite = resolve; });
-    const hold = new Promise(resolve => { releaseCommit = resolve; });
-    const originalSave = Opportunity.prototype.save;
-    t.mock.method(Opportunity.prototype, "save", async function (...args) {
-      const saved = await originalSave.apply(this, args);
-      if (this.soldAt && String(this._id) === item._id) {
-        signalSaleWrite();
-        await hold;
-      }
-      return saved;
-    });
-    const purchase = charge(item, buyer, "buy");
-    await Promise.race([wroteSale, purchase.then(() => { throw Error("Sale did not reach inventory write"); })]);
-    const admission = req("/workspace/apply/" + role._id, applicant, "POST", {});
-    releaseCommit();
-    const [sale, application] = await Promise.all([purchase, admission]);
-    assert.equal(sale.status, 201);
-    assert.equal(application.status, 409);
-    assert.equal(await ApplyWork.countDocuments({ position: role._id }), 0);
   });
 
   await t.test("failure after wallet debit rolls back grant, inventory and debit; retry succeeds", async t => {
