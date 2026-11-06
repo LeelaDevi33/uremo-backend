@@ -3,23 +3,12 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const cookieParser = require("cookie-parser");
+const { checkCorsOrigin } = require("./config/browserOrigins");
 
 // PATCH_31: Load FlowEngine hooks (side-effect module)
 require("./core/flowHooks");
 
 const app = express();
-
-const isAllowedOrigin = (origin) => {
-  // Allow non-browser clients (no Origin header)
-  if (!origin) return true;
-
-  return (
-    origin === "https://uremo.online" ||
-    origin === "https://www.uremo.online" ||
-    origin === "http://localhost:3000" ||
-    /^https:\/\/.*\.vercel\.app$/.test(origin)
-  );
-};
 
 // Routes
 const authRoutes = require("./routes/auth.routes");
@@ -80,12 +69,7 @@ const Order = require("./models/Order");
 const OrderMessage = require("./models/OrderMessage");
 
 const corsOptions = {
-  origin: (origin, callback) => {
-    if (isAllowedOrigin(origin)) return callback(null, true);
-    const err = new Error(`CORS blocked: ${origin}`);
-    err.status = 403;
-    return callback(err, false);
-  },
+  origin: checkCorsOrigin,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   // NOTE: Browsers may include Cache-Control/Pragma in preflight (e.g., Next.js fetch defaults).

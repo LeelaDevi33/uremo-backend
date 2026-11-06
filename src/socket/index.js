@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const Order = require("../models/Order");
 const OrderMessage = require("../models/OrderMessage");
 const mongoose = require("mongoose");
+const { isAllowedOrigin, checkCorsOrigin } = require("../config/browserOrigins");
 
 let io = null;
 
@@ -42,30 +43,15 @@ function safeAck(ack, payload) {
 }
 
 /**
- * Allowed origins for Socket.io CORS.
- */
-const isAllowedOrigin = (origin) => {
-  if (!origin) return true;
-  return (
-    origin === "https://uremo.online" ||
-    origin === "https://www.uremo.online" ||
-    origin === "http://localhost:3000" ||
-    /^https:\/\/.*\.vercel\.app$/.test(origin)
-  );
-};
-
-/**
  * Initialize Socket.io server on existing HTTP server.
  */
 function initSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
-      origin: (origin, callback) => {
-        if (isAllowedOrigin(origin)) return callback(null, true);
-        return callback(new Error("CORS blocked"), false);
-      },
+      origin: checkCorsOrigin,
       credentials: true,
     },
+    allowRequest: (req, callback) => callback(null, isAllowedOrigin(req.headers.origin)),
     transports: ["websocket", "polling"],
     pingTimeout: 60000,
     pingInterval: 25000,
