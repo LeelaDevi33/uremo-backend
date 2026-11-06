@@ -201,6 +201,49 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await req(roleApi + "/projects/" + project._id + "/activate", admin, "PUT", {})).status, 409);
   });
 
+  await t.test("admin project detail scopes the worker application and proof history to the actual assignment", async () => {
+    const Project = require("../src/models/Project"), Proof = require("../src/models/ProofOfWork");
+    const parent = await makeRole(), wrongRole = await makeRole();
+    const member = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: member, name: "Preview researcher", role: "user", email: "research-fixture@example.invalid" });
+    // The unrelated role was created first, as happens with a multi-role worker.
+    await ApplyWork.create({ user: member, position: wrongRole._id, category: "design", status: "approved", workerStatus: "ready_to_work" });
+    const project = await Project.create({ title: "Records audit", description: "Check the signed brief.", category: "design",
+      payRate: 12, workPositionId: parent._id, assignedTo: member, status: "assigned", createdBy: admin._id });
+    const right = await ApplyWork.create({ user: member, position: parent._id, currentProject: project._id, category: "design", status: "approved", workerStatus: "assigned" });
+    const proof = await Proof.create({ workerId: member, jobRoleId: parent._id, projectId: project._id, submissionText: "First review attached" });
+    await Proof.create({ workerId: member, jobRoleId: wrongRole._id, projectId: new mongoose.Types.ObjectId(), submissionText: "Separate review" });
+    const path = "/admin/workspace/project/" + project._id;
+    assert.equal((await req(path, buyer)).status, 403);
+    const detail = await req(path, admin);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.project.description, "Check the signed brief.");
+    assert.equal(detail.project.workPositionId._id, String(parent._id));
+    assert.equal(detail.project.assignedTo.name, "Preview researcher");
+    assert.equal(detail.workerProfile._id, String(right._id));
+    assert.equal(detail.workerProfile.user.name, "Preview researcher");
+    assert.equal(detail.workerProfile.position._id, String(parent._id));
+    assert.equal(detail.workerProfile.position.title, parent.title);
+    assert.deepEqual(detail.proofs.map(p => p._id), [String(proof._id)]);
+    assert.equal(detail.proofs[0].jobRoleId._id, String(parent._id));
+    assert.equal(detail.proofs[0].workerId.name, "Preview researcher");
+    await ApplyWork.deleteOne({ _id: right._id });
+    assert.equal((await req(path, admin)).workerProfile, null);
+    assert.equal((await req("/admin/workspace/project/invalid", admin)).status, 400);
+    await ApplyWork.create({ user: member, position: parent._id, category: "design", workerStatus: "working" });
+    await ApplyWork.create({ user: other._id, position: parent._id, category: "design", workerStatus: "assigned" });
+    await ApplyWork.create({ user: renter._id, position: parent._id, category: "design", workerStatus: "applied" });
+    const applicants = "/admin/workspace/job/" + parent._id + "/applicants?";
+    const first = await req(applicants + "workerStatus=assigned,working&limit=1&page=1", admin);
+    const second = await req(applicants + "workerStatus=assigned,working&limit=1&page=2", admin);
+    assert.equal(first.total, 2);
+    assert.equal(first.pages, 2);
+    assert.notEqual(first.applicants[0]._id, second.applicants[0]._id);
+    for (const query of ["workerStatus=bogus", "workerStatus=assigned,", "page=0", "limit=101"]) {
+      assert.equal((await req(applicants + query, admin)).status, 400);
+    }
+  });
+
   await t.test("admin drafts, private/public field boundaries, category, terms and publication checks", async () => {
     assert.equal((await req(adminApi)).status, 401);
     assert.equal((await req(adminApi, buyer)).status, 403);

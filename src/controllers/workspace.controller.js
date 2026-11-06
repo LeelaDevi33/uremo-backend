@@ -1707,41 +1707,40 @@ exports.adminAssignTask = async (req, res) => {
  */
 exports.adminGetProjectById = async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id)
-      .populate("assignedTo", "name email workerStatus")
-      .populate("createdBy", "firstName lastName email")
-      .populate("screeningId", "title passingScore timeLimit")
-      .populate("screeningIds", "title passingScore timeLimit")
-      .populate(
-        "datasetId",
-        "name datasetType difficultyLevel minJustificationWords minWordCount allowMultiResponseComparison isActive",
-      ) // PATCH_95
-      .lean();
+    if (!Project.base.isObjectIdOrHexString(req.params.id)) return res.status(400).json({ message: "Invalid project ID" });
+    const project = await Project.findById(req.params.id).lean();
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
+    // Capture the stored IDs before population. A deleted role must not make
+    // an unrelated application for the same person appear to own this work.
+    const owner = project.assignedTo, role = project.workPositionId;
+    const identity = "name firstName lastName email";
+    const roleFields = "title category active";
+    await Project.populate(project, [
+      { path: "workPositionId", select: roleFields },
+      { path: "assignedTo", select: identity }, { path: "createdBy", select: identity },
+      { path: "screeningId", select: "title passingScore timeLimit" }, { path: "screeningIds", select: "title passingScore timeLimit" },
+      { path: "datasetId", select: "name datasetType difficultyLevel minJustificationWords minWordCount allowMultiResponseComparison isActive" },
+    ]);
 
-    // Get worker profile if assigned
     let workerProfile = null;
-    if (project.assignedTo) {
-      workerProfile = await ApplyWork.findOne({ user: project.assignedTo._id })
-        .populate("user", "firstName lastName email")
-        .populate("position", "name category")
-        .lean();
+    if (owner) {
+      const filter = { user: owner, ...(role ? { position: role } : {}) };
+      const exact = await ApplyWork.findOne({ ...filter, $or: [{ currentProject: project._id }, { "projectsCompleted.projectId": project._id }] })
+        .sort({ updatedAt: -1 }).lean();
+      if (exact) workerProfile = exact;
+      else {
+        const candidates = await ApplyWork.find(filter).limit(2).lean();
+        if (candidates.length === 1) workerProfile = candidates[0];
+      }
+      if (workerProfile) await ApplyWork.populate(workerProfile, [
+        { path: "user", select: identity }, { path: "position", select: roleFields },
+      ]);
     }
-
-    // Get proofs for this project
     const ProofOfWork = require("../models/ProofOfWork");
-    let proofs = [];
-    try {
-      proofs = await ProofOfWork.find({ projectId: req.params.id })
-        .populate("workerId", "firstName lastName email name")
-        .sort({ createdAt: -1 })
-        .lean();
-    } catch (proofErr) {
-      console.warn("[WORKSPACE] Failed to fetch proofs:", proofErr.message);
-    }
+    const proofs = await ProofOfWork.find({ projectId: project._id })
+      .populate("workerId", identity).populate("jobRoleId", roleFields).populate("reviewedBy", identity)
+      .sort({ createdAt: -1 }).lean();
 
     res.json({
       success: true,
