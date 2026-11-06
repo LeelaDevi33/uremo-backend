@@ -17,6 +17,7 @@ const schema = new Schema({
   buyPrice: { type: Number, min: 0, default: 0 },
   currency: { type: String, enum: ["USD"], default: "USD" },
   firstPublishedAt: Date,
+  preserveRoleUntilPublished: { type: Boolean, default: false, select: false },
   soldAt: { type: Date, default: null },
   rentedUntil: { type: Date, default: null },
   applicationCount: { type: Number, default: 0 },

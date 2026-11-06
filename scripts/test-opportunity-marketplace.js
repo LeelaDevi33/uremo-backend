@@ -212,6 +212,24 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await req("/apply-work/me?positionId=invalid", applicant)).status, 400);
   });
 
+  await t.test("a migration-only draft preserves an existing open role until the admin archives or publishes it", async () => {
+    for (const transition of ["archived", "published"]) {
+      const role = await makeRole();
+      const item = await Opportunity.create({ ...offer, workPositionId: role._id, status: "draft", applyEnabled: true,
+        preserveRoleUntilPublished: true });
+      const legacy = "/work-positions/by-service/" + role.serviceId;
+      assert.equal((await req(legacy)).status, 200);
+      assert.equal((await req(api + "/" + item._id)).status, 404);
+      assert.equal((await req("/workspace/apply/" + role._id, applicant, "POST", {})).status, 201);
+      assert.equal((await req("/apply-work", renter, "POST", { positionId: role._id, resumeUrl: "https://example.invalid/cv" })).status, 201);
+      assert.equal((await req(adminApi + "/" + item._id, admin, "PATCH", { status: transition })).status, 200);
+      assert.equal((await req(adminApi + "/" + item._id, admin, "PATCH", { status: "draft" })).status, 200);
+      assert.equal((await req(legacy)).status, 404);
+      assert.equal((await req("/workspace/apply/" + role._id, other, "POST", {})).status, 409);
+      assert.equal((await req(adminApi + "/" + item._id, admin, "PATCH", { preserveRoleUntilPublished: true })).status, 400);
+    }
+  });
+
   await t.test("a deactivated role hides Apply on list and detail while administrators can see the configured role", async () => {
     const role = await makeRole();
     const item = await create({ applyEnabled: true, workPositionId: role._id });

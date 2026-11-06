@@ -85,7 +85,7 @@ async function saveListing(req, res) {
   let saved;
   try {
     saved = await Opportunity.db.transaction(async session => {
-      const item = id ? await Opportunity.findById(id).select("+deliverable").session(session) : new Opportunity();
+      const item = id ? await Opportunity.findById(id).select("+deliverable +preserveRoleUntilPublished").session(session) : new Opportunity();
       if (!item) throw error(404, "Opportunity not found");
       if (item.soldAt && (Object.keys(patch).length !== 1 || patch.status !== "archived")) {
         throw error(409, "A sold opportunity can only be archived");
@@ -95,6 +95,10 @@ async function saveListing(req, res) {
       }
       const previousRole = item.workPositionId;
       item.set(patch);
+      if (item.preserveRoleUntilPublished && (item.status !== "draft" || !item.applyEnabled ||
+          String(previousRole) !== String(item.workPositionId))) {
+        item.preserveRoleUntilPublished = false;
+      }
       const publishing = item.status === "published";
       if (publishing) {
         if (!item.title || !item.description || !item.category || !item.rightsConfirmed) {
