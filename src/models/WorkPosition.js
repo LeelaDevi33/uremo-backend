@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const brief = require("./roleBrief");
 
 /**
  * PATCH_43: Enhanced WorkPosition (Job Role) model
@@ -31,6 +32,12 @@ const workPositionSchema = new mongoose.Schema(
       ...simpleText,
       default: "",
     },
+    ...Object.fromEntries(Object.entries(brief.choices).map(([key, allowed]) =>
+      [key, { ...simpleText, enum: allowed }])),
+    ...Object.fromEntries(Object.entries(brief.textLimits).map(([key, limit]) =>
+      [key, { ...simpleText, validate: value => brief.validLine(value, limit) }])),
+    ...Object.fromEntries(Object.entries(brief.listLimits).map(([key, limit]) =>
+      [key, { type: [{ type: String, trim: true }], default: undefined, validate: values => brief.validList(values, limit) }])),
     // PATCH_43: Link to originating service (for auto-created job roles)
     serviceId: {
       type: mongoose.Schema.Types.ObjectId,

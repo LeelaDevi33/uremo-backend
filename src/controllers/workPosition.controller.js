@@ -1,10 +1,12 @@
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
+const brief = require("../models/roleBrief");
 const { specializationRoles } = require("../services/roleCatalog");
 const { roleError, withRevision, editRole, removeRole } = require("../services/adminWorkRoles");
 
 const publicPositionFields =
-  "title category description requirements serviceId hasScreening screeningId screeningIds active sortOrder createdAt updatedAt";
+  "title category description requirements experienceLevel workMode locationEligibility timeCommitment skills responsibilities " +
+  "serviceId hasScreening screeningId screeningIds active sortOrder createdAt updatedAt";
 
 function roleFields(body, creating) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw roleError(400, "Provide work role fields");
@@ -16,6 +18,15 @@ function roleFields(body, creating) {
       if (typeof value !== "string" || value.trim().length > limits[key] ||
           (["title", "category"].includes(key) && !value.trim())) throw roleError(400, "Invalid " + key);
       patch[key] = value.trim();
+    } else if (Object.hasOwn(brief.choices, key)) {
+      if (!brief.choices[key].includes(value)) throw roleError(400, "Invalid " + key);
+      patch[key] = value;
+    } else if (Object.hasOwn(brief.textLimits, key)) {
+      if (!brief.validLine(value, brief.textLimits[key])) throw roleError(400, "Invalid " + key);
+      patch[key] = value.trim();
+    } else if (Object.hasOwn(brief.listLimits, key)) {
+      if (!brief.validList(value, brief.listLimits[key])) throw roleError(400, "Invalid " + key);
+      patch[key] = value.map(item => item.trim());
     } else if (key === "active" && typeof value === "boolean") patch.active = value;
     else if (key === "sortOrder" && Number.isSafeInteger(value)) patch.sortOrder = value;
     else throw roleError(400, "Invalid or unsupported role setting: " + key);
@@ -31,7 +42,7 @@ exports.listPublic = async (req, res, next) => {
       .select(publicPositionFields)
       .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
-    res.json(await specializationRoles(positions));
+    res.set("Cache-Control", "no-store").json(await specializationRoles(positions));
   } catch (err) {
     next(err);
   }
@@ -63,7 +74,7 @@ exports.getByServiceId = async (req, res, next) => {
       });
     }
 
-    res.json({
+    res.set("Cache-Control", "no-store").json({
       hasJobRole: true,
       position,
     });
