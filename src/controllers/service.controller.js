@@ -1101,7 +1101,7 @@ exports.getMarketplace = async (req, res) => {
     // This handles legacy services without stored allowedActions
     const rawServices = await Service.find(query)
       .sort(sortBy)
-      .populate("linkedJobId", "title hasScreening trainingMaterials")
+      .populate("linkedJobId", "title hasScreening")
       .lean();
 
     // Enrich with computed allowedActions and filter by intent

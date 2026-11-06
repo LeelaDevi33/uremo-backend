@@ -1,6 +1,9 @@
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
 
+const publicPositionFields =
+  "title category description requirements serviceId hasScreening screeningId screeningIds active sortOrder createdAt updatedAt";
+
 const clampString = (value, maxLen) => {
   if (typeof value !== "string") return "";
   const out = value.trim();
@@ -18,6 +21,7 @@ const clampInt = (value, fallback = 0) => {
 exports.listPublic = async (req, res, next) => {
   try {
     const positions = await WorkPosition.find({ active: true })
+      .select(publicPositionFields)
       .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
     res.json(positions);
@@ -41,6 +45,7 @@ exports.getByServiceId = async (req, res, next) => {
       serviceId: serviceId,
       active: true,
     })
+      .select(publicPositionFields)
       .populate("screeningId", "title passingScore timeLimit")
       .lean();
 
