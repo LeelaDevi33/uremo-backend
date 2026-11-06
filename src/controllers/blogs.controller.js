@@ -4,6 +4,8 @@
  */
 
 const Blog = require("../models/Blog");
+const publicCategories = ["microjobs", "opportunities", "guides", "general"];
+const publicBlogs = { status: "published", category: { $in: publicCategories } };
 
 // Helper to generate slug from title
 const slugify = (str) => {
@@ -48,6 +50,10 @@ exports.createBlog = async (req, res) => {
         ok: false,
         message: "Title and content are required",
       });
+    }
+
+    if (!publicCategories.includes(category || "general")) {
+      return res.status(400).json({ ok: false, message: "Choose a current project or editorial category." });
     }
 
     // Generate slug from title
@@ -111,6 +117,13 @@ exports.updateBlog = async (req, res) => {
         ok: false,
         message: "Blog not found",
       });
+    }
+
+    if ((status || blog.status) === "published" && !publicCategories.includes(category ?? blog.category)) {
+      return res.status(400).json({ ok: false, message: "Choose a current category before publishing." });
+    }
+    if (category !== undefined && category !== blog.category && !publicCategories.includes(category)) {
+      return res.status(400).json({ ok: false, message: "Choose a current project or editorial category." });
     }
 
     // Update fields
@@ -248,17 +261,20 @@ exports.getPublicBlogs = async (req, res) => {
 
     const { category, limit = 20, page = 1, search } = req.query;
 
-    const filter = { status: "published" };
-    if (category && category !== "all") filter.category = category;
+    const filter = { ...publicBlogs };
+    if (category && category !== "all") {
+      filter.category = publicCategories.includes(category) ? category : { $in: [] };
+    }
 
     // Search in title and excerpt
     if (search) {
-      const searchRegex = new RegExp(search, "i");
+      const searchRegex = new RegExp(String(search).slice(0, 200).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       filter.$or = [{ title: searchRegex }, { excerpt: searchRegex }];
     }
 
-    const take = Math.min(parseInt(limit) || 20, 50);
-    const skip = (parseInt(page) - 1) * take;
+    const take = Math.max(1, Math.min(parseInt(limit) || 20, 50));
+    const currentPage = Math.max(1, parseInt(page) || 1);
+    const skip = (currentPage - 1) * take;
 
     const blogs = await Blog.find(filter)
       .sort({ createdAt: -1 })
@@ -270,7 +286,7 @@ exports.getPublicBlogs = async (req, res) => {
     const total = await Blog.countDocuments(filter);
 
     // Get available categories for filtering
-    const categories = await Blog.distinct("category", { status: "published" });
+    const categories = await Blog.distinct("category", publicBlogs);
 
     res.json({
       ok: true,
@@ -280,7 +296,7 @@ exports.getPublicBlogs = async (req, res) => {
       },
       meta: {
         total,
-        page: parseInt(page),
+        page: currentPage,
         limit: take,
         pages: Math.ceil(total / take),
       },
@@ -304,7 +320,7 @@ exports.getBlogBySlug = async (req, res) => {
 
     const { slug } = req.params;
 
-    const blog = await Blog.findOne({ slug, status: "published" })
+    const blog = await Blog.findOne({ slug, ...publicBlogs })
       .populate("createdBy", "name")
       .lean();
 

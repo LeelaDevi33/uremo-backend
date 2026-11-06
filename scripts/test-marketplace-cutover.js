@@ -21,10 +21,26 @@ test("marketplace cutover preserves history and reports only settled project rev
   t.after(() => new Promise(resolve => server.close(resolve)));
   const worker = new mongoose.Types.ObjectId(), editor = new mongoose.Types.ObjectId();
   await User.collection.insertMany([{ _id: worker, email: "worker@example.test", role: "user" }, { _id: editor, email: "editor@example.test", role: "admin" }]);
-  async function request(path, method = "GET", who = worker) {
+  async function request(path, method = "GET", who = worker, data) {
     const headers = who ? { Authorization: "Bearer " + jwt.sign({ id: String(who) }, process.env.JWT_SECRET) } : {};
-    return fetch(`http://127.0.0.1:${server.address().port}/api` + path, { headers, method });
+    if (data) headers["Content-Type"] = "application/json";
+    return fetch(`http://127.0.0.1:${server.address().port}/api` + path, { headers, method, body: JSON.stringify(data) });
   }
+  await t.test("archived markets stay out of public article searches, direct links and new campaigns", async () => {
+    const Blog = require("../src/models/Blog");
+    const archive = await Blog.create({ title: "Retired sector", slug: "retired", category: "forex_crypto", content: "Earlier product", status: "published" });
+    const post = { title: "Guide [first edition]", category: "opportunities", content: "Project scope", status: "published" };
+    assert.equal((await request("/admin/blogs", "POST", editor, post)).status, 201);
+    assert.equal((await request("/admin/blogs", "POST", editor, { ...post, category: "forex_crypto" })).status, 400);
+    const list = await (await request("/blogs?search=%5B", "GET", null)).json();
+    assert.equal(list.meta.total, 1);
+    assert.deepEqual(list.filters.categories, ["opportunities"]);
+    assert.equal((await (await request("/blogs?category=forex_crypto", "GET", null)).json()).meta.total, 0);
+    assert.equal((await request("/blogs/retired", "GET", null)).status, 404);
+    assert.equal((await request("/admin/blogs/" + archive._id, "GET", editor)).status, 200);
+    assert.equal((await request("/admin/blogs/" + archive._id, "PUT", editor, { status: "draft" })).status, 200);
+    assert.equal((await request("/admin/campaigns/send", "POST", editor, { title: "Fixture", message: "Fixture", targetTags: ["forex"] })).status, 400);
+  });
   await t.test("retired creation endpoints reject requests without reserving orders or debiting wallets", async () => {
     for (const path of ["/orders", "/orders/deal", "/rentals/create", "/rentals/" + worker + "/renew",
       "/payment/checkout", "/payments/checkout", "/wallet/topup/paypal/create", "/service-requests",

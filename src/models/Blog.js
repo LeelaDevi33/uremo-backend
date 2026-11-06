@@ -6,6 +6,7 @@
 const mongoose = require("mongoose");
 
 const BLOG_CATEGORIES = [
+  "opportunities",
   "microjobs",
   "forex_crypto",
   "banks_wallets",

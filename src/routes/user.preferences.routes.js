@@ -4,7 +4,7 @@ const auth = require("../middlewares/auth.middleware");
 const User = require("../models/User");
 const rateLimit = require("express-rate-limit");
 
-const VALID_INTERESTS = ["microjobs", "rentals", "project_purchase", "forex", "wallets", "crypto"];
+const VALID_INTERESTS = ["microjobs", "rentals", "project_purchase"];
 const MAX_INTERESTS = 10;
 const MAX_TAG_LENGTH = 50;
 const VALID_PREF_KEYS = [
@@ -59,7 +59,7 @@ router.get("/preferences", auth, async (req, res) => {
       success: true,
       data: {
         emailPreferences: user.emailPreferences || {},
-        interestTags: user.interestTags || [],
+        interestTags: (user.interestTags || []).filter((tag) => VALID_INTERESTS.includes(tag)),
       },
     });
   } catch (error) {

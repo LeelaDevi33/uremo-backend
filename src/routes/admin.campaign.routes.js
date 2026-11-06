@@ -21,7 +21,7 @@ const campaignLimiter = rateLimit({
 
 const MAX_CAMPAIGN_TITLE = 500;
 const MAX_CAMPAIGN_MESSAGE = 5000;
-const VALID_INTERESTS = ["microjobs", "forex", "wallets", "crypto", "rentals"];
+const VALID_INTERESTS = ["microjobs", "rentals", "project_purchase"];
 
 /**
  * PATCH_53: Admin Campaign Routes
