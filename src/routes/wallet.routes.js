@@ -27,10 +27,10 @@ router.post("/cancel-topup", walletController.cancelTopup);
 
 // PATCH_82: PayPal Top-Up Routes
 // GET /api/wallet/topup/paypal/available - Check if PayPal is configured
-router.get("/topup/paypal/available", walletController.isPayPalAvailable);
+router.get("/topup/paypal/available", (_req, res) => res.json({ success: true, available: false }));
 
 // POST /api/wallet/topup/paypal/create - Create PayPal order for top-up
-router.post("/topup/paypal/create", walletController.createPayPalTopup);
+router.post("/topup/paypal/create", (_req, res) => res.status(410).json({ message: "New PayPal top-ups are closed. Use a manual wallet top-up request." }));
 
 // POST /api/wallet/topup/paypal/confirm - Confirm PayPal payment after user approves
 router.post("/topup/paypal/confirm", walletController.confirmPayPalTopup);

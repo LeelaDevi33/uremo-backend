@@ -18,7 +18,6 @@
 
 const DEFAULT_CANDIDATES = [
   "http://localhost:5000",
-  "https://uremo-backend.onrender.com",
 ];
 
 function isInteractiveTty() {
@@ -115,14 +114,6 @@ async function fetchJson(url, init, timeoutMs = 8000) {
   return { res, body, text };
 }
 
-function extractServicesArray(body) {
-  if (Array.isArray(body)) return body;
-  if (body && typeof body === "object" && Array.isArray(body.services)) {
-    return body.services;
-  }
-  return null;
-}
-
 async function canReach(base) {
   try {
     const { res, body } = await fetchJson(
@@ -189,22 +180,13 @@ async function testHealth(base) {
   pass("/api/health reachable");
 }
 
-async function testServices(base) {
-  const { res, body, text } = await fetchJson(
-    `${base}/api/services`,
-    { method: "GET" },
-    12000,
-  );
-  if (!res.ok) {
-    fail(`/api/services returned HTTP ${res.status}`, text);
+async function testOpportunities(base) {
+  const { res, body } = await fetchJson(base + "/api/opportunities", { method: "GET" }, 12000);
+  if (!res.ok || body?.ok !== true || !Array.isArray(body.opportunities)) {
+    fail("Opportunity catalog returned an unexpected response", res.status);
     return;
   }
-  const services = extractServicesArray(body);
-  if (!services) {
-    fail(`/api/services expected JSON array or { services: [...] }`, text);
-    return;
-  }
-  pass(`/api/services ok (${services.length} items)`);
+  pass(`/api/opportunities ok (${body.opportunities.length} listings)`);
 }
 
 async function testAuthOrdersMy(base, creds) {
@@ -281,112 +263,11 @@ async function testAuthOrdersMy(base, creds) {
 
   pass(`/api/orders/my ok (${ordersBody.length} orders)`);
 
-  // PATCH_11: Validate JarvisX admin service activation path does real DB update
-  try {
-    const {
-      res: servicesRes,
-      body: servicesBody,
-      text: servicesText,
-    } = await fetchJson(`${base}/api/services`, { method: "GET" }, 12000);
-    const services = servicesRes.ok ? extractServicesArray(servicesBody) : null;
-    if (!services || !services[0]) {
-      fail("Could not fetch services for JarvisX admin test", servicesText);
-      return;
-    }
-
-    const serviceId = services[0]._id;
-    if (!serviceId || typeof serviceId !== "string") {
-      fail("Service item missing _id for JarvisX admin test");
-      return;
-    }
-
-    const activatePayload = JSON.stringify({
-      mode: "admin",
-      message: `activate service ${serviceId}`,
-    });
-
-    const {
-      res: jarvisRes,
-      body: jarvisBody,
-      text: jarvisText,
-    } = await fetchJson(
-      `${base}/api/jarvisx/chat`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: activatePayload,
-      },
-      20000,
-    );
-
-    if (!jarvisRes.ok) {
-      fail(
-        `/api/jarvisx/chat (admin) returned HTTP ${jarvisRes.status}`,
-        jarvisText,
-      );
-      return;
-    }
-    if (!jarvisBody || typeof jarvisBody !== "object") {
-      fail("/api/jarvisx/chat (admin) did not return JSON", jarvisText);
-      return;
-    }
-    if (jarvisBody.ok !== true) {
-      fail("JarvisX admin activation did not succeed", jarvisText);
-      return;
-    }
-
-    pass("JarvisX admin activation ok (real DB write path)");
-
-    const badIdPayload = JSON.stringify({
-      mode: "admin",
-      message: "activate service 000000000000000000000000",
-    });
-    const {
-      res: jarvisBadRes,
-      body: jarvisBadBody,
-      text: jarvisBadText,
-    } = await fetchJson(
-      `${base}/api/jarvisx/chat`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: badIdPayload,
-      },
-      20000,
-    );
-
-    if (!jarvisBadRes.ok) {
-      fail(
-        `/api/jarvisx/chat (admin bad id) returned HTTP ${jarvisBadRes.status}`,
-        jarvisBadText,
-      );
-      return;
-    }
-    if (!jarvisBadBody || typeof jarvisBadBody !== "object") {
-      fail(
-        "/api/jarvisx/chat (admin bad id) did not return JSON",
-        jarvisBadText,
-      );
-      return;
-    }
-    if (jarvisBadBody.ok !== false) {
-      fail("JarvisX admin bad-id should return ok:false", jarvisBadText);
-      return;
-    }
-
-    pass("JarvisX admin bad-id correctly returns ok:false");
-  } catch (err) {
-    fail(
-      "JarvisX admin service action smoke test threw",
-      err?.stack || String(err),
-    );
-  }
+  const { res, body } = await fetchJson(base + "/api/opportunities/mine", {
+    method: "GET", headers: { Authorization: "Bearer " + token },
+  }, 12000);
+  if (!res.ok || !Array.isArray(body?.grants)) return fail("My project access returned an unexpected response", res.status);
+  pass(`My project access ok (${body.grants.length} grants)`);
 }
 
 async function main() {
@@ -408,7 +289,7 @@ async function main() {
   }
 
   await testHealth(normalizedBase);
-  await testServices(normalizedBase);
+  await testOpportunities(normalizedBase);
 
   if (args.auth) {
     await testAuthOrdersMy(normalizedBase, {

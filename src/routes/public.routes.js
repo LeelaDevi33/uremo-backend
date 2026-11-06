@@ -11,88 +11,27 @@ const router = express.Router();
  * Returns trust signals for display on homepage
  * Non-numeric, evergreen content only
  */
-router.get("/trust", (req, res) => {
-  res.json({
-    ok: true,
-    trustSignals: [
-      {
-        id: "manual_verification",
-        icon: "🔍",
-        title: "Manual Verification",
-        description: "Human-reviewed since 2024",
-      },
-      {
-        id: "accounts_processed",
-        icon: "✅",
-        title: "Accounts Processed",
-        description: "Hundreds of successful verifications",
-      },
-      {
-        id: "fulfillment_time",
-        icon: "⚡",
-        title: "Fast Fulfillment",
-        description: "24-48 hour average completion",
-      },
-      {
-        id: "human_support",
-        icon: "💬",
-        title: "Human Support",
-        description: "Real people, real assistance",
-      },
-    ],
-  });
+router.get("/trust", (_req, res) => {
+  res.json({ ok: true, trustSignals: [
+    { id: "free_application", title: "Free applications", description: "Apply directly for a published role." },
+    { id: "rental_term", title: "Fixed rental term", description: "See the price and access duration before confirming." },
+    { id: "exclusive_sale", title: "Exclusive purchase", description: "An outright purchase closes the listing." },
+  ] });
 });
 
-/**
- * GET /api/public/categories
- * Returns available service categories
- * PATCH_62: Aligned with actual service.category values in database
- */
-router.get("/categories", (req, res) => {
-  res.json({
-    ok: true,
-    categories: [
-      {
-        id: "microjobs",
-        name: "Microjobs & Gigs",
-        icon: "💼",
-        description: "AI training, data entry, and freelance work",
-      },
-      {
-        id: "forex_crypto",
-        name: "Forex & Crypto",
-        icon: "📈",
-        description: "Trading accounts and exchange verification",
-      },
-      {
-        id: "banks_gateways_wallets",
-        name: "Banks & Wallets",
-        icon: "🏦",
-        description: "Bank accounts, payment gateways, and e-wallets",
-      },
-      {
-        id: "rentals",
-        name: "Account Rentals",
-        icon: "🔑",
-        description: "Rent verified accounts on flexible plans",
-      },
-      {
-        id: "general",
-        name: "General Services",
-        icon: "🛠️",
-        description: "Other digital services and support",
-      },
-    ],
-  });
+router.get("/categories", async (_req, res, next) => {
+  try {
+    const Opportunity = require("../models/Opportunity");
+    const names = await Opportunity.distinct("category", { status: "published", soldAt: null });
+    res.json({ ok: true, categories: names.filter(Boolean).map(name => ({ id: name, name })) });
+  } catch (err) {
+    next(err);
+  }
 });
 
-/**
- * PATCH_50: GET /api/public/stats
- * Returns real platform stats for homepage display
- */
 router.get("/stats", async (req, res) => {
   try {
-    const Service = require("../models/Service");
+    const Opportunity = require("../models/Opportunity");
     const WorkPosition = require("../models/WorkPosition");
     const User = require("../models/User");
     const Order = require("../models/Order");
@@ -100,7 +39,7 @@ router.get("/stats", async (req, res) => {
     // Get real counts from database
     const [activeServices, activeJobRoles, totalUsers, completedOrders] =
       await Promise.all([
-        Service.countDocuments({ active: true }),
+        Opportunity.countDocuments({ status: "published", soldAt: null }),
         WorkPosition.countDocuments({ active: true }),
         User.countDocuments({ role: { $ne: "admin" } }),
         Order.countDocuments({ status: "completed" }),
@@ -109,6 +48,7 @@ router.get("/stats", async (req, res) => {
     res.json({
       ok: true,
       stats: {
+        activeOpportunities: activeServices,
         activeServices,
         activeJobRoles,
         totalUsers,

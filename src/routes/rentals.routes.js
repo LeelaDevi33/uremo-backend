@@ -3,23 +3,21 @@
  */
 
 const express = require("express");
+const retiredCatalog = require("../middlewares/retiredCatalog");
 const auth = require("../middlewares/auth.middleware");
 const {
-  getRentalServices,
-  createRentalOrder,
   getUserRentals,
   getRentalById,
   cancelRental,
-  renewRental,
 } = require("../controllers/rentals.controller");
 
 const router = express.Router();
 
 // Get all rental services (public)
-router.get("/", getRentalServices);
+router.get("/", retiredCatalog);
 
 // Create rental order (requires auth)
-router.post("/create", auth, createRentalOrder);
+router.post("/create", auth, retiredCatalog);
 
 // Get user's rentals
 router.get("/my", auth, getUserRentals);
@@ -31,6 +29,6 @@ router.get("/:id", auth, getRentalById);
 router.put("/:id/cancel", auth, cancelRental);
 
 // Renew rental
-router.post("/:id/renew", auth, renewRental);
+router.post("/:id/renew", auth, retiredCatalog);
 
 module.exports = router;

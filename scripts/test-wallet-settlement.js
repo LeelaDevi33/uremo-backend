@@ -49,10 +49,11 @@ test("wallet, account and scheduler regression checks", { skip: !port }, async (
   const pay = (id, extra) => post("/wallet/pay", { orderId: String(id), ...extra });
   const balance = async () => (await User.findById(buyer._id)).walletBalance;
 
-  await t.test("new quotes survive a catalog edit and eight overlapping requests settle once", async () => {
+  await t.test("pre-cutover quotes survive a catalog edit and eight overlapping requests settle once", async () => {
     const reservation = await post("/orders", { serviceId });
-    assert.equal(reservation.status, 200);
-    const id = (await reservation.json()).orderId;
+    assert.equal(reservation.status, 410);
+    assert.equal(await Order.countDocuments(), 0);
+    const { _id: id } = await order({ quotedAmount: 70, quotedCurrency: "USD" });
     await Service.collection.updateOne({ _id: serviceId }, { $set: { price: 95 } });
     let transitions = 0;
     const hook = () => { transitions++; };
@@ -113,9 +114,9 @@ test("wallet, account and scheduler regression checks", { skip: !port }, async (
     assert.equal(await balance(), 109);
   });
 
-  await t.test("disabled Stripe does not reserve an order", async () => {
+  await t.test("retired Stripe checkout does not reserve an order", async () => {
     const before = await Order.countDocuments();
-    assert.equal((await post("/payment/checkout", { serviceId })).status, 503);
+    assert.equal((await post("/payment/checkout", { serviceId })).status, 410);
     assert.equal(await Order.countDocuments(), before);
   });
 

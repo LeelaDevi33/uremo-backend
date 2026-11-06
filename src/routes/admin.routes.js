@@ -45,7 +45,33 @@ const {
   putAdminSettingsRaw,
 } = require("../controllers/siteSettings.controller");
 
+const retiredCatalog = require("../middlewares/retiredCatalog");
 const router = express.Router();
+
+// Legacy CMS aliases share this prefix across two mounted routers. Preserve historical reads.
+router.use("/services", (req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  return retiredCatalog(req, res);
+});
+
+router.get("/marketplace-revenue", auth, admin, async (_req, res, next) => {
+  try {
+    const OpportunityGrant = require("../models/OpportunityGrant");
+    const rows = await OpportunityGrant.aggregate([
+      { $match: { type: { $in: ["rent", "buy"] }, currency: "USD" } },
+      { $group: {
+        _id: "$type",
+        count: { $sum: 1 },
+        cents: { $sum: { $round: [{ $multiply: ["$amount", 100] }, 0] } },
+      } },
+    ]);
+    const totals = { currency: "USD", rent: { count: 0, total: 0 }, buy: { count: 0, total: 0 } };
+    for (const row of rows) totals[row._id] = { count: row.count, total: row.cents / 100 };
+    res.set("Cache-Control", "private, no-store").json(totals);
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/orders", auth, admin, getAllOrders);
 router.get("/orders/rejected", auth, admin, getRejectedArchivedOrders);

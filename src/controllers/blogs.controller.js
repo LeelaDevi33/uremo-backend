@@ -4,7 +4,6 @@
  */
 
 const Blog = require("../models/Blog");
-const Service = require("../models/Service");
 
 // Helper to generate slug from title
 const slugify = (str) => {
@@ -321,22 +320,11 @@ exports.getBlogBySlug = async (req, res) => {
       () => {},
     );
 
-    // Fetch related services if any
-    let relatedServices = [];
-    if (blog.relatedServices && blog.relatedServices.length > 0) {
-      relatedServices = await Service.find({
-        _id: { $in: blog.relatedServices },
-        $or: [{ status: "active" }, { active: true }],
-      })
-        .select("_id title slug price currency imageUrl category subcategory")
-        .lean();
-    }
-
     res.json({
       ok: true,
       blog: {
         ...blog,
-        relatedServices,
+        relatedServices: [],
       },
     });
   } catch (err) {

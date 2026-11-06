@@ -10,7 +10,6 @@ const getOrders = require("./getOrders");
 const getWallet = require("./getWallet");
 const getServices = require("./getServices");
 const getRentals = require("./getRentals");
-const createService = require("./createService");
 const updateOrderStatus = require("./updateOrderStatus");
 // PATCH_51: New tools for brain rebuild
 const getWorkspaceProfile = require("./getWorkspaceProfile");
@@ -60,13 +59,6 @@ const TOOLS = {
   },
 
   // ============ ADMIN TOOLS ============
-  createService: {
-    name: "createService",
-    description: "Create a new service listing (admin only)",
-    requiresAuth: true,
-    adminOnly: true,
-    execute: createService,
-  },
   updateOrderStatus: {
     name: "updateOrderStatus",
     description: "Update an order's status (admin only)",

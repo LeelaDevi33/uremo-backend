@@ -4,7 +4,7 @@ const auth = require("../middlewares/auth.middleware");
 const User = require("../models/User");
 const rateLimit = require("express-rate-limit");
 
-const VALID_INTERESTS = ["microjobs", "forex", "wallets", "crypto", "rentals"];
+const VALID_INTERESTS = ["microjobs", "rentals", "project_purchase", "forex", "wallets", "crypto"];
 const MAX_INTERESTS = 10;
 const MAX_TAG_LENGTH = 50;
 const VALID_PREF_KEYS = [

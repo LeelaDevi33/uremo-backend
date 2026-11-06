@@ -261,7 +261,7 @@ async function adminCommand(req, res) {
 
   try {
     // 1. Verify admin role
-    if (!req.user?.isAdmin) {
+    if (req.user?.role !== "admin") {
       return res.status(403).json({
         success: false,
         error: "Admin access required",
@@ -469,7 +469,7 @@ async function health(req, res) {
 async function healthReport(req, res) {
   try {
     // Verify admin
-    if (!req.user?.isAdmin) {
+    if (req.user?.role !== "admin") {
       return res.status(403).json({ error: "Admin required" });
     }
 

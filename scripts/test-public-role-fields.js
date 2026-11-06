@@ -33,13 +33,13 @@ test("public role and marketplace responses exclude internal notes and project r
   await new Promise((resolve, reject) => server.once("listening", resolve).once("error", reject));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const paths = ["/api/work-positions", `/api/work-positions/by-service/${serviceId}`, "/api/services/marketplace?intent=all"];
+  const paths = ["/api/work-positions", `/api/work-positions/by-service/${serviceId}`];
   for (const pathname of paths) {
     await t.test(pathname.split("?")[0], async () => {
       const response = await fetch(base + pathname);
       assert.equal(response.status, 200);
       const data = await response.json();
-      const position = Array.isArray(data) ? data[0] : data.position || data.services[0].linkedJob;
+      const position = Array.isArray(data) ? data[0] : data.position;
       assert.equal(position._id, positionId.toString());
       assert.equal(position.title, title);
       assert.equal(position.hasScreening, false);
@@ -48,6 +48,13 @@ test("public role and marketplace responses exclude internal notes and project r
       }
     });
   }
+  await t.test("retired catalogue returns a migration notice without disclosing listings", async () => {
+    const response = await fetch(base + "/api/services/marketplace?intent=all");
+    assert.equal(response.status, 410);
+    const data = await response.json();
+    assert.equal(data.marketplace, "/api/opportunities");
+    assert.equal(data.services, undefined);
+  });
   const stored = await WorkPosition.findById(positionId).lean();
   assert.equal(stored.adminNotes, note);
   assert.equal(stored.trainingMaterials[0].url, material);
