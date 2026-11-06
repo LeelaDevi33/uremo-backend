@@ -6,6 +6,7 @@
 const User = require("../models/User");
 const AffiliateTransaction = require("../models/AffiliateTransaction");
 const AffiliateWithdrawal = require("../models/AffiliateWithdrawal");
+const { isWalletAmount } = require("../services/walletFunds");
 const { sendNotification } = require("../services/notification.service");
 
 // Global commission rate (10%)
@@ -36,7 +37,7 @@ exports.getMyAffiliateStats = async (req, res) => {
 
     // Count transactions
     const transactionStats = await AffiliateTransaction.aggregate([
-      { $match: { user: userId } },
+      { $match: { user: user._id } },
       {
         $group: {
           _id: "$status",
@@ -48,7 +49,7 @@ exports.getMyAffiliateStats = async (req, res) => {
 
     // Pending withdrawals
     const pendingWithdrawals = await AffiliateWithdrawal.aggregate([
-      { $match: { user: userId, status: "pending" } },
+      { $match: { user: user._id, status: "pending" } },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]);
 
@@ -140,10 +141,11 @@ exports.getMyCommissions = async (req, res) => {
     const user = await User.findById(userId).select(
       "affiliateBalance totalAffiliateEarned",
     );
+    if (!user) return res.status(404).json({ ok: false, message: "Referral account not found" });
 
     // Get total withdrawn
     const withdrawnResult = await AffiliateWithdrawal.aggregate([
-      { $match: { user: userId, status: { $in: ["paid", "pending"] } } },
+      { $match: { user: user._id, status: { $in: ["paid", "pending"] } } },
       { $group: { _id: "$status", total: { $sum: "$amount" } } },
     ]);
 
@@ -190,57 +192,27 @@ exports.withdrawAffiliateBalance = async (req, res) => {
     const userId = req.user.id || req.user._id;
     const { amount, paymentMethod, paymentDetails } = req.body;
 
-    // Validate input
-    if (!amount || !paymentMethod || !paymentDetails) {
-      return res.status(400).json({
-        ok: false,
-        message: "Amount, payment method, and payment details required",
-      });
+    const withdrawAmount = typeof amount === "string" ? Number(amount) : amount;
+    if (!isWalletAmount(withdrawAmount) || withdrawAmount < MINIMUM_WITHDRAWAL ||
+        !["paypal", "crypto", "bank"].includes(paymentMethod) || typeof paymentDetails !== "string" || !paymentDetails.trim()) {
+      return res.status(400).json({ ok: false, message: "Provide a supported payout method, payment details and at least $10 in whole cents" });
     }
-
-    const withdrawAmount = parseFloat(amount);
-    if (isNaN(withdrawAmount) || withdrawAmount < MINIMUM_WITHDRAWAL) {
-      return res.status(400).json({
-        ok: false,
-        message: `Minimum withdrawal is $${MINIMUM_WITHDRAWAL}`,
-      });
-    }
-
-    // Check for pending withdrawals first
-    const pendingWithdrawal = await AffiliateWithdrawal.findOne({
-      user: userId,
-      status: "pending",
+    const result = await User.db.transaction(async session => {
+      if (await AffiliateWithdrawal.exists({ user: userId, status: "pending" }).session(session)) {
+        return { message: "You already have a pending withdrawal request" };
+      }
+      const owner = await User.findOneAndUpdate({ _id: userId, affiliateBalance: { $gte: withdrawAmount } },
+        [{ $set: { affiliateBalance: { $toDouble: { $subtract: [
+          { $toDecimal: "$affiliateBalance" }, { $toDecimal: withdrawAmount.toFixed(2) },
+        ] } } } }], { session, updatePipeline: true });
+      if (!owner) return { message: "Insufficient referral balance" };
+      const [withdrawal] = await AffiliateWithdrawal.create([{
+        user: userId, amount: withdrawAmount, paymentMethod, paymentDetails: paymentDetails.trim(), status: "pending",
+      }], { session, ordered: true });
+      return { withdrawal };
     });
-
-    if (pendingWithdrawal) {
-      return res.status(400).json({
-        ok: false,
-        message: "You already have a pending withdrawal request",
-      });
-    }
-
-    // ATOMIC: Deduct from balance using findOneAndUpdate to prevent race conditions
-    const updateResult = await User.findOneAndUpdate(
-      { _id: userId, affiliateBalance: { $gte: withdrawAmount } },
-      { $inc: { affiliateBalance: -withdrawAmount } },
-      { new: true },
-    );
-
-    if (!updateResult) {
-      return res.status(400).json({
-        ok: false,
-        message: "Insufficient balance or concurrent transaction",
-      });
-    }
-
-    // Create withdrawal request
-    const withdrawal = await AffiliateWithdrawal.create({
-      user: userId,
-      amount: withdrawAmount,
-      paymentMethod,
-      paymentDetails,
-      status: "pending",
-    });
+    if (result.message) return res.status(400).json({ ok: false, message: result.message });
+    const { withdrawal } = result;
 
     res.json({
       ok: true,
@@ -628,47 +600,35 @@ exports.getAdminWithdrawals = async (req, res) => {
  * PUT /api/admin/affiliate/withdrawals/:id/approve
  * PATCH-64: Enhanced with guardrails and audit logging
  */
+async function finishHistoricalWithdrawal(id, status, actor, notes, transactionId) {
+  return AffiliateWithdrawal.db.transaction(async session => {
+    const withdrawal = await AffiliateWithdrawal.findById(id).session(session);
+    if (!withdrawal) return { status: 404, error: "Withdrawal not found" };
+    if (withdrawal.status !== "pending") return { status: 400, error: "Withdrawal already processed" };
+    if (!await User.exists({ _id: withdrawal.user }).session(session)) return { status: 404, error: "Referral account not found" };
+    if (status === "rejected") {
+      await User.updateOne({ _id: withdrawal.user }, [{ $set: { affiliateBalance: { $toDouble: { $add: [
+        { $toDecimal: { $ifNull: ["$affiliateBalance", 0] } }, { $toDecimal: String(withdrawal.amount) },
+      ] } } } }], { session, updatePipeline: true });
+    } else {
+      withdrawal.transactionId = transactionId || "";
+    }
+    withdrawal.set({ status, adminNotes: notes || "", processedBy: actor, processedAt: new Date() });
+    await withdrawal.save({ session });
+    return { withdrawal };
+  });
+}
+
 exports.approveWithdrawal = async (req, res) => {
   try {
     const { logAdminAction } = require("../services/adminAudit.service");
     const { id } = req.params;
     const { transactionId, adminNotes } = req.body;
 
-    const withdrawal = await AffiliateWithdrawal.findById(id);
-    if (!withdrawal) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Withdrawal not found" });
-    }
-
-    // PATCH-64 GUARDRAIL: Check if already processed
-    if (withdrawal.status !== "pending") {
-      return res.status(400).json({
-        ok: false,
-        message: `Cannot approve withdrawal with status: ${withdrawal.status}`,
-        hint: "This withdrawal has already been processed",
-      });
-    }
-
-    // PATCH-64 GUARDRAIL: Verify user's affiliate balance wasn't already deducted
-    const user = await User.findById(withdrawal.user);
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        message: "User not found for this withdrawal",
-      });
-    }
-
-    // PATCH-64 GUARDRAIL: Log warning if balance is inconsistent
-    // (Balance was already deducted when withdrawal was requested)
-    const previousStatus = withdrawal.status;
-
-    withdrawal.status = "paid";
-    withdrawal.transactionId = transactionId || "";
-    withdrawal.adminNotes = adminNotes || "";
-    withdrawal.processedBy = req.user.id || req.user._id;
-    withdrawal.processedAt = new Date();
-    await withdrawal.save();
+    const result = await finishHistoricalWithdrawal(id, "paid", req.user.id || req.user._id, adminNotes, transactionId);
+    if (result.error) return res.status(result.status).json({ ok: false, message: result.error });
+    const { withdrawal } = result;
+    const previousStatus = "pending";
 
     // PATCH-64: Log admin action
     await logAdminAction({
@@ -726,32 +686,9 @@ exports.rejectWithdrawal = async (req, res) => {
     const { id } = req.params;
     const { adminNotes } = req.body;
 
-    const withdrawal = await AffiliateWithdrawal.findById(id);
-    if (!withdrawal) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Withdrawal not found" });
-    }
-
-    if (withdrawal.status !== "pending") {
-      return res.status(400).json({
-        ok: false,
-        message: `Cannot reject withdrawal with status: ${withdrawal.status}`,
-      });
-    }
-
-    // Refund balance to user
-    const user = await User.findById(withdrawal.user);
-    if (user) {
-      user.affiliateBalance += withdrawal.amount;
-      await user.save();
-    }
-
-    withdrawal.status = "rejected";
-    withdrawal.adminNotes = adminNotes || "Withdrawal rejected by admin";
-    withdrawal.processedBy = req.user.id || req.user._id;
-    withdrawal.processedAt = new Date();
-    await withdrawal.save();
+    const result = await finishHistoricalWithdrawal(id, "rejected", req.user.id || req.user._id, adminNotes);
+    if (result.error) return res.status(result.status).json({ ok: false, message: result.error });
+    const { withdrawal } = result;
 
     // PATCH_29: Notify user about rejected withdrawal
     try {
