@@ -11,6 +11,7 @@
  */
 
 const AdminAuditLog = require("../models/AdminAuditLog");
+const User = require("../models/User");
 
 /**
  * Log an admin action
@@ -37,9 +38,10 @@ async function logAdminAction({
   metadata,
 }) {
   try {
+    const actorEmail = adminEmail || (await User.findById(adminId).select("email").lean())?.email;
     await AdminAuditLog.create({
       adminId,
-      adminEmail,
+      adminEmail: actorEmail,
       action,
       entityType,
       entityId,

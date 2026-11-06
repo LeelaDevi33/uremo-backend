@@ -47,6 +47,9 @@ const {
 
 const retiredCatalog = require("../middlewares/retiredCatalog");
 const router = express.Router();
+const operations = require("../controllers/adminOperations.controller");
+router.get("/operations-summary", auth, admin, operations.overview);
+router.get("/marketplace-receipts", auth, admin, operations.receipts);
 
 // Legacy CMS aliases share this prefix across two mounted routers. Preserve historical reads.
 router.use("/services", (req, res, next) => {
