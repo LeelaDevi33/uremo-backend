@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const Opportunity = require("../models/Opportunity");
 const Grant = require("../models/OpportunityGrant");
-const User = require("../models/User");
+const { changeFunds } = require("../services/walletFunds");
 const WalletTransaction = require("../models/WalletTransaction");
 const WorkPosition = require("../models/WorkPosition");
 
@@ -195,21 +195,7 @@ function checkout(type) {
         else item.soldAt = now;
         await item.save({ session });
 
-        // Use decimal subtraction so a sequence of cent-sized purchases does not
-        // leave a binary rounding residue in the existing number-valued USD wallet.
-        const previousAccount = await User.findOneAndUpdate(
-          { _id: userId, walletBalance: { $gte: amount } },
-          [{ $set: { walletBalance: { $toDouble: { $subtract: [
-            { $toDecimal: "$walletBalance" }, { $toDecimal: amount.toFixed(2) },
-          ] } }, lastWalletUpdate: now } }],
-          { new: false, session, updatePipeline: true },
-        ).select("walletBalance");
-        if (!previousAccount) {
-          const user = await User.findById(userId).select("walletBalance").session(session).lean();
-          if (!user) throw error(404, "Wallet not found");
-          throw error(402, "Insufficient wallet balance", { required: amount, available: user.walletBalance || 0 });
-        }
-        const account = await User.findById(userId).select("walletBalance").session(session).lean();
+        const account = await changeFunds(userId, amount, "spend", session);
         const [grant] = await Grant.create([{
           opportunityId: item._id, userId, type, requestId, title: item.title, deliverable: item.deliverable,
           amount, currency: "USD", startsAt: now, endsAt: until, rentalDays: isRental ? item.rentalDays : null,
@@ -218,7 +204,7 @@ function checkout(type) {
         await WalletTransaction.create([{
           user: userId, type: "debit", source: isRental ? "rental_purchase" : "service_purchase",
           status: "success", provider: "internal", referenceId: grant._id, amount,
-          balanceBefore: previousAccount.walletBalance, balanceAfter: account.walletBalance,
+          balanceBefore: account.balanceBefore, balanceAfter: account.walletBalance,
           description: (isRental ? "Opportunity rental: " : "Exclusive opportunity purchase: ") + item.title,
         }], { session, ordered: true });
         return { ok: true, grant: grantView(grant, now), walletBalance: account.walletBalance, replayed: false };

@@ -604,15 +604,9 @@ exports.submitProject = async (req, res) => {
  */
 exports.getEarnings = async (req, res) => {
   try {
-    const profile = await ApplyWork.findOne({ user: req.user.id }).lean();
-    if (!profile) {
-      return res.json({
-        totalEarnings: 0,
-        pendingEarnings: 0,
-        withdrawable: 0,
-        history: [],
-      });
-    }
+    const user = await User.findById(req.user.id).select("walletBalance withdrawable pendingWithdrawals lifetimeEarnings").lean();
+    const profile = await ApplyWork.findOne({ user: req.user.id }).select("payRate pendingEarnings totalEarnings").lean();
+    const { availableFunds } = require("../services/walletFunds");
 
     // Get completed projects with earnings
     const completedProjects = await Project.find({
@@ -625,10 +619,10 @@ exports.getEarnings = async (req, res) => {
       .lean();
 
     res.json({
-      totalEarnings: profile.totalEarnings || 0,
-      pendingEarnings: profile.pendingEarnings || 0,
-      withdrawable: profile.totalEarnings || 0,
-      payRate: profile.payRate || 0,
+      totalEarnings: Math.max(user?.lifetimeEarnings || 0, profile?.totalEarnings || 0),
+      pendingEarnings: profile?.pendingEarnings || 0,
+      withdrawable: user ? availableFunds(user).withdrawable : 0,
+      payRate: profile?.payRate || 0,
       history: completedProjects.map((p) => ({
         projectId: p._id,
         title: p.title,
@@ -645,48 +639,9 @@ exports.getEarnings = async (req, res) => {
  * POST /api/workspace/withdraw
  * Request earnings withdrawal
  */
-exports.requestWithdrawal = async (req, res) => {
-  try {
-    const { amount, method, details } = req.body;
-
-    // PATCH_96: Validate amount is a positive number
-    const withdrawAmount = parseFloat(amount);
-    if (!withdrawAmount || isNaN(withdrawAmount) || withdrawAmount <= 0) {
-      return res
-        .status(400)
-        .json({ message: "Valid positive amount required" });
-    }
-    if (withdrawAmount < 1) {
-      return res.status(400).json({ message: "Minimum withdrawal is $1.00" });
-    }
-
-    // PATCH_96: Atomic earnings deduction with balance guard
-    const profile = await ApplyWork.findOneAndUpdate(
-      { user: req.user.id, totalEarnings: { $gte: withdrawAmount } },
-      { $inc: { totalEarnings: -withdrawAmount } },
-      { new: true },
-    );
-    if (!profile) {
-      const existing = await ApplyWork.findOne({ user: req.user.id });
-      if (!existing)
-        return res.status(400).json({ message: "No worker profile found" });
-      return res.status(400).json({ message: "Insufficient earnings balance" });
-    }
-
-    // PATCH_96: Atomic wallet credit using $inc
-    await User.findByIdAndUpdate(req.user.id, {
-      $inc: { walletBalance: withdrawAmount },
-    });
-
-    res.json({
-      success: true,
-      message: `$${withdrawAmount.toFixed(2)} transferred to your wallet. You can withdraw from the Wallet page.`,
-      newEarningsBalance: profile.totalEarnings,
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
+// Project earnings are already credited to the wallet when awarded. Both
+// withdrawal entry points must reserve those same dollars for review.
+exports.requestWithdrawal = require("./wallet.controller").requestWithdrawal;
 
 // ============ ADMIN ENDPOINTS ============
 

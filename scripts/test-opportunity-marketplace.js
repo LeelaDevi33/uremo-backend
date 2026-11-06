@@ -9,6 +9,9 @@ const Wallet = require("../src/models/WalletTransaction");
 const User = require("../src/models/User");
 const Role = require("../src/models/WorkPosition");
 const ApplyWork = require("../src/models/ApplyWork");
+const Order = require("../src/models/Order");
+const Service = require("../src/models/Service");
+const Withdrawal = require("../src/models/WithdrawalRequest");
 
 const port = process.env.UREMO_TEST_MONGO_PORT;
 test("project marketplace through mounted HTTP routes", { skip: !port }, async t => {
@@ -288,5 +291,110 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
       assert.equal((await charge(item, small, "buy", { requestId: randomUUID(), expectedAmount: amount })).status, 201);
     }
     assert.equal(await readBalance(small), 0);
+  });
+
+  async function walletFixture(balance, withdrawable) {
+    const member = { _id: new mongoose.Types.ObjectId(), role: "user" };
+    await User.collection.insertOne({ ...member, email: randomUUID() + "@example.test", walletBalance: balance, withdrawable, pendingWithdrawals: 0 });
+    return member;
+  }
+  const wallet = user => req("/wallet/balance", user);
+  const withdraw = (user, amount) => req("/wallet/withdraw", user, "POST", { amount });
+  const review = (id, action) => req("/admin/wallet/withdrawals/" + id + "/" + action, admin, "PUT", {});
+  await t.test("reserved withdrawals cannot be spent and settlement pays once", async () => {
+    const member = await walletFixture(25,25);
+    const hold = await withdraw(member,25);
+    assert.equal(hold.status, 200);
+    const item = await create({});
+    assert.equal((await charge(item, member, "buy")).status, 402);
+    assert.equal((await wallet(member)).spendable, 0);
+    assert.equal((await review(hold.withdrawal._id, "approve")).status, 200);
+    const replies = await Promise.all([review(hold.withdrawal._id, "pay"),review(hold.withdrawal._id, "pay")]);
+    assert.deepEqual(replies.map(r => r.status).sort(), [200,404]);
+    assert.equal((await wallet(member)).balance, 0);
+    assert.equal((await wallet(member)).pendingWithdrawals, 0);
+    assert.equal(await Wallet.countDocuments({ user: member._id, source: "withdrawal_completed" }), 1);
+  });
+  await t.test("checkouts consume top-ups first and a competing payout cannot claim spent earnings", async () => {
+    const member = await walletFixture(30,20);
+    assert.equal((await charge(await create({}), member, "buy")).status, 201);
+    assert.equal((await wallet(member)).withdrawable, 5);
+    assert.equal((await withdraw(member, 10)).status, 400);
+    const rival = await walletFixture(25,25);
+    const item = await create({});
+    const [spend, hold] = await Promise.all([charge(item,rival,"buy"), withdraw(rival,25)]);
+    assert.ok((spend.status === 201 && hold.status === 400) || (spend.status === 402 && hold.status === 200));
+    assert.equal((await wallet(rival)).spendable, 0);
+  });
+  await t.test("the older work withdrawal entry cannot credit already-paid earnings a second time", async () => {
+    const member = await walletFixture(25,25);
+    await ApplyWork.create({ user: member._id, category: "design", totalEarnings: 25, resumeUrl: "https://example.invalid/cv" });
+    const reply = await req("/workspace/withdraw", member, "POST", { amount: 25 });
+    assert.equal(reply.status, 200);
+    assert.equal((await wallet(member)).balance,25);
+    assert.equal((await wallet(member)).pendingWithdrawals,25);
+    assert.equal((await req("/workspace/earnings", member)).withdrawable, 0);
+    assert.equal((await review(reply.withdrawal._id, "reject")).status,200);
+    assert.equal((await wallet(member)).withdrawable,25);
+  });
+  await t.test("legacy orders and admin debits cannot spend reserved cash or race a new purchase into overdraft", async () => {
+    const member = await walletFixture(25,25);
+    const service = await Service.collection.insertOne({ title: "Historical fixture", price: 25, currency: "USD" });
+    const order = await Order.create({ userId: member._id, serviceId: service.insertedId, quotedAmount: 25, quotedCurrency: "USD" });
+    const settle = () => req("/wallet/pay", member, "POST", { orderId: order._id, expectedAmount: 25, expectedCurrency: "USD" });
+    const hold = await withdraw(member, 25);
+    assert.equal((await settle()).status, 400);
+    assert.equal((await req("/admin/wallet/adjust", admin, "POST", { amount: 5, userId: member._id, type: "debit", description: "Synthetic debit" })).status, 400);
+    const item = await create({});
+    assert.equal((await review(hold.withdrawal._id, "reject")).status, 200);
+    const [oldOrder, purchase] = await Promise.all([settle(), charge(item, member, "buy")]);
+    assert.ok((oldOrder.status === 200 && purchase.status === 402) || (oldOrder.status === 400 && purchase.status === 201));
+    assert.equal(await Wallet.countDocuments({ user: member._id, type: "debit", status: "success" }), 1);
+    assert.equal((await wallet(member)).balance, 0);
+    assert.equal((await wallet(member)).withdrawable, 0);
+  });
+  await t.test("withdrawal retries reserve once, mismatched keys conflict, and a failed request write releases the hold", async t => {
+    const member = await walletFixture(100,100);
+    const requestId = randomUUID();
+    const submit = amount => req("/wallet/withdraw", member, "POST", { amount, requestId });
+    const failure = t.mock.method(Withdrawal, "create", async () => { throw Error("Simulated receipt failure"); });
+    assert.equal((await submit(25)).status, 500);
+    failure.mock.restore();
+    assert.equal((await wallet(member)).pendingWithdrawals, 0);
+    assert.equal(await Wallet.countDocuments({ user: member._id }), 0);
+    const replies = await Promise.all([submit(25), submit(25), submit(25)]);
+    assert.deepEqual(replies.map(r => r.status), [200,200,200]);
+    assert.equal(new Set(replies.map(r => r.withdrawal._id)).size, 1);
+    assert.equal((await submit(30)).status, 409);
+    const id = replies[0].withdrawal._id;
+    assert.equal((await review(id, "approve")).status, 200);
+    const brokenLedger = t.mock.method(Wallet, "findOneAndUpdate", async () => { throw Error("Simulated payout write failure"); });
+    assert.equal((await review(id, "pay")).status, 500);
+    brokenLedger.mock.restore();
+    assert.equal((await wallet(member)).balance, 100);
+    assert.equal((await wallet(member)).pendingWithdrawals, 25);
+    const competed = await Promise.all([review(id, "pay"), review(id, "reject")]);
+    assert.deepEqual(competed.map(x => x.status).sort(), [200,404]);
+    const end = await wallet(member);
+    assert.equal(end.pendingWithdrawals, 0);
+    assert.equal(end.balance, competed[0].status === 200 ? 75 : 100);
+    assert.equal(end.withdrawable, end.balance);
+  });
+  await t.test("approved top-ups cannot unlock stale historical withdrawal eligibility or credit twice", async t => {
+    const member = await walletFixture(0,25);
+    assert.equal((await withdraw(member, 10)).status, 400);
+    const topup = await req("/wallet/topup", member, "POST", { amount: 25 });
+    assert.equal(topup.status, 200);
+    const approve = () => req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: topup.transactionId });
+    const failure = t.mock.method(Wallet.prototype, "save", async () => { throw Error("Simulated top-up ledger failure"); });
+    assert.equal((await approve()).status, 500);
+    failure.mock.restore();
+    assert.equal(await readBalance(member), 0);
+    assert.deepEqual((await Promise.all([approve(), approve()])).map(r => r.status).sort(), [200,400]);
+    const final = await wallet(member);
+    assert.equal(final.balance, 25);
+    assert.equal(final.spendable, 25);
+    assert.equal(final.withdrawable, 0);
+    assert.equal((await withdraw(member, 10)).status, 400);
   });
 });
