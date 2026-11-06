@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "preview:marketplace": "node scripts/local-marketplace.js",
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "build": "node scripts/build.js",

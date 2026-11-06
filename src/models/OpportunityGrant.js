@@ -7,6 +7,7 @@ const schema = new Schema({
   type: { type: String, enum: ["buy", "rent"], required: true },
   requestId: { type: String, required: true },
   title: { type: String, required: true },
+  projectScope: { type: String, default: "" },
   deliverable: { type: String, required: true, select: false },
   amount: { type: Number, required: true, min: 0.01 },
   currency: { type: String, enum: ["USD"], default: "USD" },

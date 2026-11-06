@@ -25,6 +25,7 @@ function listingView(item, { admin = false, handoff = false } = {}) {
   const availability = item.soldAt ? "sold" : item.rentedUntil > new Date() ? "rented" : "available";
   const result = {
     _id: item._id, title: item.title, description: item.description, category: item.category, status: item.status,
+    revision: item.updatedAt?.toISOString(),
     availability, applyEnabled: admin ? item.applyEnabled : Boolean(item.applyEnabled && !item.soldAt && item.workPositionId),
     workPositionId: item.workPositionId?._id || item.workPositionId || null,
     rentEnabled: item.rentEnabled, rentPrice: item.rentPrice, rentalDays: item.rentalDays,
@@ -40,6 +41,7 @@ function listingView(item, { admin = false, handoff = false } = {}) {
 function grantView(grant, now = new Date()) {
   return {
     _id: grant._id, opportunityId: grant.opportunityId, title: grant.title, type: grant.type,
+    projectScope: grant.projectScope || "",
     amount: grant.amount, currency: grant.currency, startsAt: grant.startsAt, endsAt: grant.endsAt,
     active: grant.startsAt <= now && (!grant.endsAt || grant.endsAt > now),
   };
@@ -164,7 +166,7 @@ function checkout(type) {
   return async (req, res) => {
     const id = req.params.id;
     validId(id);
-    const { requestId, expectedAmount, expectedRentalDays } = req.body || {};
+    const { requestId, expectedAmount, expectedRentalDays, expectedRevision } = req.body || {};
     if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(requestId)) throw error(400, "Provide a unique request ID");
     if (!isMoney(expectedAmount) || expectedAmount <= 0) throw error(400, "Confirm the displayed USD price");
     if (type === "rent" && (!Number.isInteger(expectedRentalDays) || expectedRentalDays < 1 || expectedRentalDays > 365)) {
@@ -183,6 +185,9 @@ function checkout(type) {
           .select("+deliverable").session(session);
         if (!item) throw error(404, "Opportunity not found");
         if (item.soldAt || item.rentedUntil > now) throw error(409, "This opportunity is already sold or rented");
+        if (expectedRevision !== undefined && expectedRevision !== item.updatedAt?.toISOString()) {
+          throw error(409, "The project brief or terms changed. Review the listing again.");
+        }
         const isRental = type === "rent";
         if (!(isRental ? item.rentEnabled : item.buyEnabled)) throw error(409, "This option is unavailable");
         const amount = isRental ? item.rentPrice : item.buyPrice;
@@ -197,7 +202,7 @@ function checkout(type) {
 
         const account = await changeFunds(userId, amount, "spend", session);
         const [grant] = await Grant.create([{
-          opportunityId: item._id, userId, type, requestId, title: item.title, deliverable: item.deliverable,
+          opportunityId: item._id, userId, type, requestId, title: item.title, projectScope: item.description, deliverable: item.deliverable,
           amount, currency: "USD", startsAt: now, endsAt: until, rentalDays: isRental ? item.rentalDays : null,
           balanceAfter: account.walletBalance,
         }], { session, ordered: true });

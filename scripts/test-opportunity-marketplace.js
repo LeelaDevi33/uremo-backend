@@ -79,6 +79,18 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await access(item)).status, 401);
   });
 
+  await t.test("a revised project scope requires fresh consent and the purchased scope survives archiving", async () => {
+    const item = await create({});
+    const fresh = await req(adminApi + "/" + item._id, admin, "PATCH", { description: "Updated project scope" });
+    const before = await readBalance(buyer);
+    const outdated = await charge(item, buyer, "buy", { ...terms("buy"), expectedRevision: item.revision });
+    assert.equal(outdated.status, 409);
+    assert.equal(await readBalance(buyer), before);
+    const paid = await charge(item, buyer, "buy", { ...terms("buy"), expectedRevision: fresh.opportunity.revision });
+    assert.equal(paid.status, 201);
+    await req(adminApi + "/" + item._id, admin, "PATCH", { status: "archived" });
+    assert.equal((await access(item, buyer)).grant.projectScope, "Updated project scope");
+  });
   await t.test("insufficient wallet, foreign role, stale price and inactive option never charge", async () => {
     const item = await create({});
     const before = await readBalance(small);
