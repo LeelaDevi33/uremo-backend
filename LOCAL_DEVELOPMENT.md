@@ -46,6 +46,26 @@ $env:UREMO_TEST_MONGO_PORT='27347'
 node --test scripts/test-opportunity-marketplace.js scripts/test-marketplace-cutover.js scripts/test-wallet-settlement.js scripts/test-prepare-opportunity-drafts.js
 ```
 
+## Check the admin and worker views before releasing
+
+Use separate browser profiles for the local demo admin and worker. For tests that create receipts or issue credits, use a disposable local database and synthetic balances.
+
+| In the admin | Check independently |
+| --- | --- |
+| Create a role, set screening order and training, and publish an opportunity with the intended application, rental and buyout options. | A worker can see only the published options. A draft or private handoff is never in the public listing. |
+| Open a listing in two admin tabs, save in the first and then try saving in the second. | The stale tab must prompt for a reload. Compare the stored price, status and handoff with the first save. |
+| Rent from the worker profile and open Access receipts as the admin. | Match the holder, price and term. Editing future terms must not change the renter's original access. A buyout closes the listing; an admin can archive it without undoing the sale. |
+| Create a role-linked project with a pay type, rate, priority and both required and optional deliverables. Return to it using the role's project link and edit the checklist. | Assign an eligible synthetic worker and reopen the worker project. The pay, ordered checklist and required markers should match the saved form. An ineligible worker must not be offered. |
+| Follow the withdrawal links from the dashboard and reopen a closed support ticket to read its replies. | Wallet withdrawals and historical referral payouts have separate queues. Replying to a closed ticket leaves the status closed; reopening requires an explicit status change. |
+
+The settlement, access and concurrency suites exercise protected API behavior independently of the browser. Run the full local regression from this directory in PowerShell:
+
+```powershell
+$env:UREMO_TEST_MONGO_PORT='27347'
+$suite = @(Get-ChildItem scripts -Filter 'test-*.js' | Where-Object { Select-String -LiteralPath $_.FullName -Pattern 'node:test' -Quiet } | ForEach-Object FullName)
+node --test --test-concurrency=2 @suite
+```
+
 ## Prepare existing roles
 
 Review the specific active roles your team can offer. On a local restored copy, run `node scripts/prepare-opportunity-drafts.js --help` for the expected inputs. Preview the selected role IDs and category map before using `--write`. Imports produce application-only drafts. A publisher supplies the description, confirms project rights, and sets any rental or buyout terms before publication. The preview and importer each select a local database explicitly.
