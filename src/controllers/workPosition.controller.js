@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
+const { unavailablePositionIds } = require("../services/opportunityApplications");
 
 const publicPositionFields =
   "title category description requirements serviceId hasScreening screeningId screeningIds active sortOrder createdAt updatedAt";
@@ -20,7 +21,7 @@ const clampInt = (value, fallback = 0) => {
 
 exports.listPublic = async (req, res, next) => {
   try {
-    const positions = await WorkPosition.find({ active: true })
+    const positions = await WorkPosition.find({ active: true, _id: { $nin: await unavailablePositionIds() } })
       .select(publicPositionFields)
       .sort({ sortOrder: 1, createdAt: -1 })
       .lean();
@@ -43,6 +44,7 @@ exports.getByServiceId = async (req, res, next) => {
 
     const position = await WorkPosition.findOne({
       serviceId: serviceId,
+      _id: { $nin: await unavailablePositionIds() },
       active: true,
     })
       .select(publicPositionFields)

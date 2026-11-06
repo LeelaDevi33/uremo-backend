@@ -161,6 +161,9 @@ app.get("/api/debug/chat-health", auth, admin, async (req, res) => {
 });
 
 // API Routes
+const opportunityRoutes = require("./routes/opportunity.routes");
+app.use("/api/opportunities", opportunityRoutes.publicRoutes);
+app.use("/api/admin/opportunities", opportunityRoutes.adminRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/services", serviceRoutes);
 app.use("/api/orders", orderRoutes);

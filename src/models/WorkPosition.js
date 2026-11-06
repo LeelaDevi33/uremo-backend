@@ -13,6 +13,7 @@ const simpleText = {
 
 const workPositionSchema = new mongoose.Schema(
   {
+    applicationRevision: { type: Number, default: 0, select: false },
     title: {
       ...simpleText,
       required: true,

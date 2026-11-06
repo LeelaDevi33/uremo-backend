@@ -5,6 +5,7 @@
  * PATCH_90: Hybrid rubric engine integration
  */
 const ApplyWork = require("../models/ApplyWork");
+const { createRoleApplication } = require("../services/opportunityApplications");
 const Screening = require("../models/Screening");
 const Project = require("../models/Project");
 const User = require("../models/User");
@@ -184,20 +185,7 @@ exports.applyToJob = async (req, res) => {
       return res.status(400).json({ message: "This position is not active" });
     }
 
-    // Check if already applied
-    const existing = await ApplyWork.findOne({
-      user: req.user.id,
-      position: jobId,
-    });
-
-    if (existing) {
-      return res
-        .status(400)
-        .json({ message: "Already applied to this position" });
-    }
-
-    // Create application
-    const application = await ApplyWork.create({
+    const application = await createRoleApplication({
       user: req.user.id,
       position: jobId,
       positionTitle: job.title,
@@ -214,7 +202,7 @@ exports.applyToJob = async (req, res) => {
       application,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message });
   }
 };
 
