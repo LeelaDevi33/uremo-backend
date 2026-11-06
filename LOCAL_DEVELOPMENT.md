@@ -12,6 +12,16 @@ npm run preview:marketplace -- --demo
 
 Open [project opportunities](http://localhost:3137/explore-services) or [admin publishing](http://localhost:3137/admin/opportunities). The API listens on port 5137. The demo option creates a synthetic worker with test credits and a synthetic editor if those accounts are missing. It prints their generated passwords when first created. Existing accounts and completed transactions keep their state when the preview restarts. Sign in again after restarting the API. Use an HTTPS sample resume link to test applications without configuring an upload provider.
 
+For a full page audit, serve the optimized build. Stop the development preview first. Run these commands in PowerShell from the backend folder:
+
+```powershell
+Push-Location ../frontend
+$env:NEXT_PUBLIC_API_URL='http://localhost:5137'
+npm run build
+Pop-Location
+npm run preview:marketplace -- --demo --production
+```
+
 ## Start a fresh local replica
 
 These commands are for a fresh development database. In PowerShell, with MongoDB Server installed, run:
@@ -19,7 +29,7 @@ These commands are for a fresh development database. In PowerShell, with MongoDB
 ```powershell
 $data = Join-Path $env:LOCALAPPDATA 'UremoPlatform\marketplace-preview'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
-mongod --dbpath "$data" --replSet uremoLocal --bind_ip 127.0.0.1 --port 27347
+mongod --dbpath "$data" --replSet uremoLocal --bind_ip 127.0.0.1 --port 27347 --wiredTigerCacheSizeGB 0.25
 ```
 
 Leave that terminal running. In a second terminal in `backend`, initialize this new replica once, then start the preview:

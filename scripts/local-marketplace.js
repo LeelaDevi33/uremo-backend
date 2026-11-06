@@ -33,7 +33,8 @@ async function run() {
     server.close();
     throw err;
   }
-  const client = spawn(process.execPath, [next, "dev", "--webpack", "--hostname", "127.0.0.1", "--port", "3137"], {
+  const mode = process.argv.includes("--production") ? ["start"] : ["dev", "--webpack"];
+  const client = spawn(process.execPath, [next, ...mode, "--hostname", "127.0.0.1", "--port", "3137"], {
     cwd: frontend, stdio: "inherit", windowsHide: true,
     env: { ...process.env, NEXT_PUBLIC_API_URL: api, JARVISX_BACKEND_URL: api, NEXT_TELEMETRY_DISABLED: "1" },
   });
