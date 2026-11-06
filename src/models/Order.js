@@ -39,6 +39,11 @@ const orderSchema = new mongoose.Schema(
       default: "unpaid",
       index: true,
     },
+    // Keep the accepted price even if the service or rental plan is edited later.
+    quotedAmount: { type: Number, min: 0, immutable: true },
+    quotedCurrency: { type: String, uppercase: true, trim: true, immutable: true },
+    settledAmount: { type: Number, min: 0 },
+    settledCurrency: { type: String, uppercase: true, trim: true },
     paymentMethod: {
       type: String,
       enum: ["wallet", "paypal", "manual", "stripe"],

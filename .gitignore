@@ -3,6 +3,7 @@ node_modules/
 .env.*
 .DS_Store
 npm-debug.log*
+token.txt
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*

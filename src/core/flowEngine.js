@@ -160,6 +160,14 @@ async function transition(type, id, nextState, meta = {}) {
     throw new Error(`${type} not found: ${id}`);
   }
 
+  const event = await saveTransition(type, item, nextState, meta);
+  publishTransition(type, event);
+  return item;
+}
+
+// A document loaded in a MongoDB transaction keeps its session on save().
+// Callers performing a settlement publish the event after the transaction commits.
+async function saveTransition(type, item, nextState, meta) {
   const currentState = item.status;
 
   // Validate the transition
@@ -203,10 +211,19 @@ async function transition(type, id, nextState, meta = {}) {
     });
 
     // Handle special order transitions (PATCH_37: normalized statuses)
-    if (nextState === "in_progress" && previousState === "pending") {
+    const confirmingPayment = previousState === "pending" || meta.paymentMethod === "manual";
+    if (nextState === "in_progress" && confirmingPayment) {
       item.payment = item.payment || {};
       item.payment.verifiedAt = new Date();
       item.paidAt = item.paidAt || new Date();
+      if (meta.paymentMethod) {
+        item.paymentMethod = meta.paymentMethod;
+        item.paymentStatus = "paid";
+        if (meta.paymentMethod === "manual" && item.quotedAmount != null) {
+          item.settledAmount = item.quotedAmount;
+          item.settledCurrency = item.quotedCurrency;
+        }
+      }
     }
 
     if (nextState === "completed") {
@@ -236,18 +253,18 @@ async function transition(type, id, nextState, meta = {}) {
   // Save the entity
   await item.save();
 
-  // Emit event for hooks
-  // Events are namespaced: type.state (e.g., "order.processing", "ticket.closed")
-  const eventName = `${type}.${nextState}`;
-  const eventPayload = {
+  return {
     item,
     previousState,
     nextState,
     meta,
     transitionedAt: new Date(),
   };
+}
 
-  emitter.emit(eventName, eventPayload);
+function publishTransition(type, eventPayload) {
+  const { item, previousState, nextState, meta, transitionedAt } = eventPayload;
+  emitter.emit(`${type}.${nextState}`, eventPayload);
 
   // Also emit a generic transition event for logging/analytics
   emitter.emit("transition", {
@@ -256,15 +273,13 @@ async function transition(type, id, nextState, meta = {}) {
     from: previousState,
     to: nextState,
     meta,
-    transitionedAt: new Date(),
+    transitionedAt,
   });
 
   console.log(
-    `[FlowEngine] ${type} ${id}: ${previousState} → ${nextState}`,
+    `[FlowEngine] ${type} ${item._id}: ${previousState} → ${nextState}`,
     meta.reason ? `(${meta.reason})` : "",
   );
-
-  return item;
 }
 
 /**
@@ -374,6 +389,8 @@ function once(event, handler) {
 module.exports = {
   // Core functions
   transition,
+  saveTransition,
+  publishTransition,
   batchTransition,
   canTransition,
   getCurrentState,

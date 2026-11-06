@@ -54,6 +54,8 @@ exports.createOrder = async (req, res) => {
       serviceId: req.body.serviceId,
       status: "pending",
       orderType: "buy",
+      quotedAmount: service.price,
+      quotedCurrency: service.currency || "USD",
       reminderSent: false,
       payment: null,
       paidAt: null,
@@ -142,6 +144,8 @@ exports.createDealOrder = async (req, res) => {
       serviceId,
       status: "pending",
       orderType: "deal",
+      quotedAmount: service.price,
+      quotedCurrency: service.currency || "USD",
       dealPercent: pct,
       notes: `Deal: ${pct}% - ${service.title}`,
       reminderSent: false,
@@ -174,7 +178,8 @@ exports.myOrders = async (req, res) => {
     // PATCH_39: Ensure userId extraction works with both id and _id
     const userId = req.user.id || req.user._id;
     const orders = await Order.find({ userId })
-      .populate("serviceId", "title price category imageUrl")
+      .populate("serviceId", "title price currency category imageUrl")
+      .populate("rentalId", "price currency")
       .populate("payment.methodId", "name type")
       .sort({ createdAt: -1 })
       .lean();
@@ -244,9 +249,9 @@ exports.getOrderById = async (req, res) => {
     }
 
     const order = await Order.findById(id)
-      .populate("serviceId", "title price")
+      .populate("serviceId", "title price currency")
       .populate("payment.methodId")
-      .populate("rentalId", "rentalType duration price startDate endDate status daysRemaining accessDetails");
+      .populate("rentalId", "rentalType duration price currency startDate endDate status daysRemaining accessDetails");
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });

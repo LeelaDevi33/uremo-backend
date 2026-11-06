@@ -10,6 +10,7 @@
 const User = require("../models/User");
 const WalletTransaction = require("../models/WalletTransaction");
 const Order = require("../models/Order");
+const Rental = require("../models/Rental");
 const { sendNotification } = require("../services/notification.service");
 
 // PATCH_31: FlowEngine for orchestrated state transitions
@@ -555,146 +556,106 @@ exports.getTransactions = async (req, res) => {
  * Body: { orderId }
  */
 exports.payWithWallet = async (req, res) => {
+  const { orderId, expectedAmount, expectedCurrency } = req.body;
+  if (!orderId || !Order.base.isObjectIdOrHexString(orderId)) {
+    return res.status(400).json({ error: "A valid order ID is required" });
+  }
+  const userId = req.user.id || req.user._id;
+
   try {
-    const { orderId } = req.body;
+    const result = await Order.db.transaction(async (session) => {
+      const order = await Order.findById(orderId)
+        .session(session)
+        .populate("serviceId", "price currency");
+      if (!order) return { status: 404, error: "Order not found" };
+      if (String(order.userId) !== String(userId)) {
+        return { status: 403, error: "Not authorized" };
+      }
+      if (order.status !== "pending" || order.paidAt || ["paid", "refunded"].includes(order.paymentStatus)) {
+        return { status: 400, error: "Order already paid or closed" };
+      }
+      if (order.expiresAt && order.expiresAt <= new Date()) {
+        return { status: 410, error: "Order expired. Reserve the service again." };
+      }
 
-    if (!orderId) {
-      return res.status(400).json({ error: "Order ID required" });
-    }
+      let amount = order.quotedAmount;
+      let currency = order.quotedCurrency;
+      let isRental = order.orderType === "rental";
+      if (amount == null) {
+        // Legacy renewals can lack both orderType and rentalId. The rental still
+        // points at its order and holds the price of the selected plan.
+        const rental = await Rental.findOne({ order: order._id })
+          .select("price currency")
+          .session(session)
+          .lean();
+        isRental = isRental || Boolean(rental);
+        const offer = isRental ? rental : order.serviceId;
+        amount = offer?.price;
+        currency = offer?.currency;
+      }
+      currency = String(currency || "USD").trim().toUpperCase();
+      if (!Number.isFinite(amount) || amount < 0.01) {
+        return { status: 400, error: "Unable to determine order price" };
+      }
+      if (currency !== "USD") {
+        return { status: 400, error: "Wallet payments require a USD quote" };
+      }
+      if ((expectedAmount !== undefined && expectedAmount !== amount) ||
+          (expectedCurrency !== undefined && expectedCurrency !== currency)) {
+        return { status: 409, error: "The order price has changed. Refresh before paying." };
+      }
 
-    const Order = require("../models/Order");
-    // Populate serviceId to get the price
-    const order = await Order.findById(orderId).populate(
-      "serviceId",
-      "price title",
-    );
+      const user = await User.findOneAndUpdate(
+        { _id: userId, walletBalance: { $gte: amount } },
+        { $inc: { walletBalance: -amount }, $set: { lastWalletUpdate: new Date() } },
+        { new: true, session },
+      );
+      if (!user) {
+        const account = await User.findById(userId).select("walletBalance").session(session);
+        if (!account) return { status: 404, error: "User not found" };
+        return { status: 400, error: "Insufficient wallet balance", required: amount, available: account.walletBalance };
+      }
 
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+      await WalletTransaction.create([{
+        user: userId,
+        type: "debit",
+        amount,
+        source: isRental ? "rental_purchase" : "service_purchase",
+        status: "success",
+        provider: "internal",
+        referenceId: order._id,
+        description: `Payment for order #${order._id.toString().slice(-6)}`,
+        balanceBefore: user.walletBalance + amount,
+        balanceAfter: user.walletBalance,
+      }], { session, ordered: true });
 
-    const userId = req.user.id || req.user._id;
-
-    // Check authorization - Order model uses userId, not user
-    const orderUserId = order.userId || order.user;
-    if (!orderUserId || orderUserId.toString() !== userId.toString()) {
-      return res.status(403).json({ error: "Not authorized" });
-    }
-
-    // PATCH_112: Triple-guard against double-pay
-    if (order.paymentStatus === "paid" || order.paidAt || order.status !== "pending") {
-      return res.status(400).json({ error: "Order already paid" });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Get order amount from service price or order fields
-    const orderAmount =
-      order.totalPrice || order.price || order.serviceId?.price || 0;
-
-    if (!orderAmount || orderAmount <= 0) {
-      return res.status(400).json({ error: "Unable to determine order price" });
-    }
-
-    if (user.walletBalance < orderAmount) {
-      return res.status(400).json({
-        error: "Insufficient wallet balance",
-        required: orderAmount,
-        available: user.walletBalance,
-      });
-    }
-
-    // ATOMIC: Deduct from wallet using findOneAndUpdate to prevent race conditions
-    const updateResult = await User.findOneAndUpdate(
-      { _id: userId, walletBalance: { $gte: orderAmount } },
-      { $inc: { walletBalance: -orderAmount } },
-      { new: true },
-    );
-
-    if (!updateResult) {
-      return res.status(400).json({
-        error: "Insufficient wallet balance or concurrent transaction",
-      });
-    }
-
-    // Create debit transaction (PATCH_80: Internal operations are instant - status='success')
-    const source =
-      order.serviceType === "rental" ? "rental_purchase" : "service_purchase";
-    const balanceBefore = (updateResult.walletBalance || 0) + orderAmount; // before was current + what we just deducted
-    await WalletTransaction.create({
-      user: userId,
-      type: "debit",
-      amount: orderAmount,
-      source,
-      status: "success", // PATCH_80: Internal debit is instant
-      provider: "internal", // PATCH_80: Internal system operation
-      referenceId: order._id,
-      description: `Payment for order #${order._id.toString().slice(-6)}`,
-      balanceBefore,
-      balanceAfter: updateResult.walletBalance,
-    });
-
-    // PATCH_110: Update lastWalletUpdate
-    await User.findByIdAndUpdate(userId, {
-      $set: { lastWalletUpdate: new Date() },
-    });
-
-    // PATCH_31: Use FlowEngine for status transition
-    // FlowEngine handles: status update, timeline, affiliate commission (via hooks)
-    try {
-      await FlowEngine.transition("order", order._id, "in_progress", {
+      order.settledAmount = amount;
+      order.settledCurrency = currency;
+      const event = await FlowEngine.saveTransition("order", order, "in_progress", {
         actor: "system",
         reason: "Payment completed via wallet",
         paymentMethod: "wallet",
-        data: { walletBalance: updateResult.walletBalance },
+        data: { walletBalance: user.walletBalance },
       });
+      return { event, walletBalance: user.walletBalance };
+    });
 
-      // PATCH_112: Persist paymentStatus/paymentMethod after FlowEngine success
-      await Order.findByIdAndUpdate(order._id, {
-        $set: { paymentStatus: "paid", paymentMethod: "wallet" },
-      });
-    } catch (flowErr) {
-      // If FlowEngine fails, fall back to direct update for critical payment flow
-      console.error(
-        "[FlowEngine] wallet payment transition failed:",
-        flowErr.message,
-      );
-      order.paymentStatus = "paid";
-      order.paymentMethod = "wallet";
-      order.status = "in_progress";
-      order.paidAt = new Date();
-      await order.save();
-
-      // Process affiliate commission manually if FlowEngine failed
-      try {
-        const {
-          processAffiliateCommission,
-        } = require("../services/affiliateCommission.service");
-        await processAffiliateCommission(order._id, "wallet");
-      } catch (affErr) {
-        console.error("Affiliate commission processing error:", affErr);
-      }
+    if (result.error) {
+      const { status, ...body } = result;
+      return res.status(status).json(body);
     }
-
-    // Refresh order data
-    const updatedOrder = await Order.findById(order._id).lean();
-
-    res.json({
+    const order = result.event.item;
+    order.$session(null);
+    FlowEngine.publishTransition("order", result.event);
+    return res.json({
       success: true,
       message: "Payment successful",
-      order: {
-        _id: updatedOrder._id,
-        paymentStatus: updatedOrder.paymentStatus || "paid",
-        status: updatedOrder.status,
-      },
-      walletBalance: updateResult.walletBalance,
+      order: { _id: order._id, paymentStatus: order.paymentStatus, status: order.status },
+      walletBalance: result.walletBalance,
     });
   } catch (err) {
     console.error("payWithWallet error:", err);
-    res.status(500).json({ error: "Payment failed" });
+    return res.status(500).json({ error: "Payment failed" });
   }
 };
 

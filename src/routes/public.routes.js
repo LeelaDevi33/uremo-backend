@@ -92,7 +92,6 @@ router.get("/categories", (req, res) => {
  */
 router.get("/stats", async (req, res) => {
   try {
-    const mongoose = require("mongoose");
     const Service = require("../models/Service");
     const WorkPosition = require("../models/WorkPosition");
     const User = require("../models/User");
@@ -103,7 +102,7 @@ router.get("/stats", async (req, res) => {
       await Promise.all([
         Service.countDocuments({ active: true }),
         WorkPosition.countDocuments({ active: true }),
-        User.countDocuments({ isVerified: true }),
+        User.countDocuments({ role: { $ne: "admin" } }),
         Order.countDocuments({ status: "completed" }),
       ]);
 
@@ -118,15 +117,7 @@ router.get("/stats", async (req, res) => {
     });
   } catch (err) {
     console.error("Public stats error:", err);
-    res.json({
-      ok: true,
-      stats: {
-        activeServices: 0,
-        activeJobRoles: 0,
-        totalUsers: 0,
-        completedOrders: 0,
-      },
-    });
+    res.status(503).json({ ok: false, message: "Platform stats unavailable" });
   }
 });
 

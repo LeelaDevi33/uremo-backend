@@ -3,9 +3,7 @@
  * Tests: Login, Create Services, Edit Service, JarvisX Admin Commands
  */
 
-const BASE_URL = process.env.API_URL || "https://uremo-backend.onrender.com";
-const ADMIN_EMAIL = "sajalnew02@gmail.com";
-const ADMIN_PASSWORD = "sajal@9547";
+const { baseUrl: BASE_URL, email, password, testFetch } = require("./admin-test-config");
 
 let authToken = null;
 let createdServiceIds = [];
@@ -20,7 +18,7 @@ async function request(method, path, body, token) {
   }
 
   try {
-    const res = await fetch(`${BASE_URL}${path}`, options);
+    const res = await testFetch(`${BASE_URL}${path}`, options);
     const text = await res.text();
     let data;
     try {
@@ -59,8 +57,8 @@ async function runTests() {
   console.log("-".repeat(40));
 
   const loginRes = await request("POST", "/api/auth/login", {
-    email: ADMIN_EMAIL,
-    password: ADMIN_PASSWORD,
+    email,
+    password,
   });
 
   log("Admin Login", loginRes);
@@ -72,7 +70,7 @@ async function runTests() {
   }
 
   authToken = loginRes.data.token;
-  console.log(`   Token: ${authToken.substring(0, 20)}...`);
+
   console.log(`   User Role: ${loginRes.data.user?.role || "N/A"}`);
 
   if (loginRes.data.user?.role !== "admin") {

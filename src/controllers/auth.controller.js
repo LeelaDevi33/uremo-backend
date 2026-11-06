@@ -240,16 +240,15 @@ exports.login = async (req, res) => {
       console.warn("[LOGIN_BAD_PASSWORD]", {
         userId: String(user._id),
         email: user.email,
-        passwordHashPrefix:
-          typeof user.password === "string" ? user.password.slice(0, 4) : null,
       });
       // Legacy compatibility: if a user was seeded with plaintext password,
       // allow one successful login and upgrade to bcrypt.
       if (
         typeof user.password === "string" &&
+        !/^\$2[abxy]?\$/.test(user.password) &&
         user.password === String(password)
       ) {
-        user.password = String(password);
+        user.markModified("password");
         await user.save();
         console.warn("[auth] upgraded legacy plaintext password", {
           userId: String(user._id),

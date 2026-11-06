@@ -11,6 +11,22 @@ router.get("/", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// Readiness includes a bounded database round-trip so a live process cannot
+// receive traffic while its database is unavailable.
+router.get("/ready", async (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  const connection = mongoose.connection;
+  if (connection.readyState === 1 && connection.db) {
+    try {
+      await connection.db.command({ ping: 1 }, { timeoutMS: 1500 });
+      return res.json({ status: "ready" });
+    } catch {
+      // Keep driver errors and connection details out of the public response.
+    }
+  }
+  return res.status(503).json({ status: "unavailable" });
+});
+
 function hasDebugAccess(req) {
   // In production, require either:
   // - a matching header token, or

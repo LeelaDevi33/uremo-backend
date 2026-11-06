@@ -618,7 +618,7 @@ if (!result) return res.status(400).json({ error: "Insufficient balance" });
 
 ```
 PORT=5000
-MONGODB_URI=mongodb+srv://...
+MONGO_URI=mongodb+srv://...
 JWT_SECRET=<secure-random-string>
 CLOUDINARY_NAME=<account>
 CLOUDINARY_API_KEY=<key>

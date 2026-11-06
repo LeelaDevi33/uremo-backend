@@ -1,7 +1,7 @@
 /**
  * JarvisX Admin Chat Mode Tests
  */
-const BASE_URL = "https://uremo-backend.onrender.com";
+const { baseUrl: BASE_URL, email, password, testFetch } = require("./admin-test-config");
 
 async function test() {
   console.log("=".repeat(60));
@@ -9,12 +9,12 @@ async function test() {
   console.log("=".repeat(60));
 
   // Login first
-  const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+  const loginRes = await testFetch(`${BASE_URL}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: "sajalnew02@gmail.com",
-      password: "sajal@9547",
+      email,
+      password,
     }),
   });
   const loginData = await loginRes.json();
@@ -45,7 +45,7 @@ async function test() {
   let failed = 0;
 
   for (const t of tests) {
-    const res = await fetch(`${BASE_URL}/api/jarvisx/chat`, {
+    const res = await testFetch(`${BASE_URL}/api/jarvisx/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

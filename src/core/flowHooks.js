@@ -68,8 +68,9 @@ on("order.in_progress", async ({ item, previousState, meta }) => {
         const rental = await Rental.findOne({ order: item._id });
         if (rental && rental.status === "pending") {
           // Set start and end dates based on rental duration
-          const startDate = new Date();
-          let endDate = new Date();
+          const now = new Date();
+          const startDate = rental.previousRental && rental.startDate > now ? rental.startDate : now;
+          const endDate = new Date(startDate);
 
           if (rental.rentalType === "months") {
             endDate.setMonth(endDate.getMonth() + rental.duration);

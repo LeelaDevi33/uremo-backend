@@ -19,12 +19,18 @@ router.get("/expire-rentals", expireRentalsJob);
 
 // PATCH_53: Process engagement events and send emails
 // Call: GET /api/cron/engagement-batch?secret=...
-router.get("/engagement-batch", async (req, res) => {
-  const secret = req.query.secret;
-  if (secret !== process.env.CRON_SECRET) {
+function requireEngagementSecret(req, res, next) {
+  const expected = process.env.CRON_SECRET;
+  if (!expected || !expected.trim()) {
+    return res.status(404).json({ message: "Route not found" });
+  }
+  if (req.query.secret !== expected) {
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
+  next();
+}
 
+router.get("/engagement-batch", requireEngagementSecret, async (req, res) => {
   try {
     await runEngagementBatch();
     res.json({ success: true, message: "Engagement batch processed" });
@@ -36,12 +42,7 @@ router.get("/engagement-batch", async (req, res) => {
 
 // PATCH_58: Smart Engagement Engine cycle
 // Call: GET /api/cron/smart-engagement?secret=...
-router.get("/smart-engagement", async (req, res) => {
-  const secret = req.query.secret;
-  if (secret !== process.env.CRON_SECRET) {
-    return res.status(401).json({ success: false, message: "Unauthorized" });
-  }
-
+router.get("/smart-engagement", requireEngagementSecret, async (req, res) => {
   try {
     const results = await runEngagementCycle();
     res.json({

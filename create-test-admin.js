@@ -23,11 +23,14 @@ const User = mongoose.model("User", userSchema);
 
 async function main() {
   try {
+    const adminEmail = process.env.TEST_ADMIN_EMAIL?.trim().toLowerCase();
+    const adminPassword = process.env.TEST_ADMIN_PASSWORD;
+    if (!adminEmail || !adminPassword) {
+      throw new Error("Set TEST_ADMIN_EMAIL and TEST_ADMIN_PASSWORD before seeding.");
+    }
     await mongoose.connect(MONGO_URI);
     console.log("Connected to MongoDB");
 
-    const adminEmail = "testadmin@uremo.com";
-    const adminPassword = "Admin@123";
 
     // Check if admin exists
     let admin = await User.findOne({ email: adminEmail });
@@ -53,7 +56,6 @@ async function main() {
 
     console.log("\n✅ Admin user ready!");
     console.log(`   Email: ${adminEmail}`);
-    console.log(`   Password: ${adminPassword}`);
     console.log(`   Role: admin`);
 
     process.exit(0);

@@ -178,6 +178,8 @@ exports.createRentalOrder = async (req, res) => {
       serviceId,
       status: "pending",
       orderType: "rental",
+      quotedAmount: plan.price,
+      quotedCurrency: service.currency || "USD",
       country: country || null,
       notes: `Rental: ${plan.duration} ${plan.unit} - ${service.title}`,
       statusLog: [{ text: "Rental order created", at: new Date() }],
@@ -896,6 +898,9 @@ exports.renewRental = async (req, res) => {
       serviceId: service._id,
       status: "pending",
       notes: `Rental Renewal: ${plan.duration} ${plan.unit} - ${service.title}`,
+      orderType: "rental",
+      quotedAmount: plan.price,
+      quotedCurrency: service.currency || "USD",
       statusLog: [{ text: "Rental renewal order created", at: new Date() }],
     });
 
@@ -922,6 +927,9 @@ exports.renewRental = async (req, res) => {
         },
       ],
     });
+
+    order.rentalId = newRental._id;
+    await order.save();
 
     // Mark old rental as renewed
     existingRental.status = "renewed";
