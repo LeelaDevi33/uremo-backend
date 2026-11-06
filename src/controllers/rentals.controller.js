@@ -6,6 +6,7 @@
 const Rental = require("../models/Rental");
 const Service = require("../models/Service");
 const Order = require("../models/Order");
+const { canReadRentalAccess } = require("../utils/rentalAccess");
 const { sendNotification } = require("../services/notification.service");
 
 // PATCH_38: Action rules enforcement
@@ -25,6 +26,13 @@ const calculateEndDate = (startDate, duration, unit) => {
   }
   return start;
 };
+
+function customerRental(rental, userId, now) {
+  const { notes, accessDetails, ...details } = rental;
+  details.isActive = canReadRentalAccess(rental, rental.order, userId, now);
+  if (details.isActive) details.accessDetails = accessDetails;
+  return details;
+}
 
 /**
  * GET ALL RENTAL SERVICES (PUBLIC)
@@ -272,7 +280,7 @@ exports.getUserRentals = async (req, res) => {
 
     const rentals = await Rental.find(query)
       .populate("service", "title slug imageUrl category subcategory")
-      .populate("order", "status payment")
+      .populate({ path: "order", match: { userId }, select: "status payment paymentStatus paidAt userId rentalId" })
       .sort({ createdAt: -1 })
       .lean();
 
@@ -291,16 +299,15 @@ exports.getUserRentals = async (req, res) => {
         r.status === "active" && now > end ? "expired" : r.status;
 
       return {
-        ...r,
+        ...customerRental(r, userId, now),
         daysRemaining,
-        isActive: r.status === "active" && now < end,
         isExpiringSoon: r.status === "active" && daysRemaining <= 3,
         computedStatus,
         activatedAt: r.activatedAt || null,
       };
     });
 
-    res.json({
+    res.set("Cache-Control", "private, no-store").json({
       ok: true,
       rentals: enrichedRentals,
       counts: {
@@ -330,7 +337,7 @@ exports.getRentalById = async (req, res) => {
         "service",
         "title slug imageUrl category subcategory rentalDescription",
       )
-      .populate("order", "status payment")
+      .populate({ path: "order", match: { userId }, select: "status payment paymentStatus paidAt userId rentalId" })
       .lean();
 
     if (!rental) {
@@ -345,12 +352,11 @@ exports.getRentalById = async (req, res) => {
       Math.ceil(diffMs / (1000 * 60 * 60 * 24)),
     );
 
-    res.json({
+    res.set("Cache-Control", "private, no-store").json({
       ok: true,
       rental: {
-        ...rental,
+        ...customerRental(rental, userId, now),
         daysRemaining,
-        isActive: rental.status === "active" && now < end,
         isExpiringSoon: rental.status === "active" && daysRemaining <= 3,
       },
     });

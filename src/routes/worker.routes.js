@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const auth = require("../middlewares/auth.middleware");
+const admin = require("../middlewares/admin.middleware");
 const {
   applyWork,
   listApplications,
@@ -26,7 +27,7 @@ const upload = multer({
 });
 
 router.post("/apply", auth, upload.single("resume"), applyWork);
-router.get("/admin", auth, listApplications);
-router.put("/admin/:id", auth, updateApplication);
+router.get("/admin", auth, admin, listApplications);
+router.put("/admin/:id", auth, admin, updateApplication);
 
 module.exports = router;

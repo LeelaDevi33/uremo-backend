@@ -4,6 +4,7 @@
  */
 
 const Rental = require("../../models/Rental");
+const { canReadRentalAccess } = require("../../utils/rentalAccess");
 
 /**
  * Get user's rentals
@@ -32,6 +33,8 @@ async function getRentals(params, context) {
   }
 
   const rentals = await Rental.find(query)
+    .select("-accessDetails -notes")
+    .populate({ path: "order", match: { userId }, select: "userId rentalId status paymentStatus paidAt payment.verifiedAt" })
     .populate("service", "title price imageUrl")
     .sort({ createdAt: -1 })
     .limit(Math.min(parseInt(limit) || 10, 20))
@@ -65,7 +68,7 @@ async function getRentals(params, context) {
       startDate: r.startDate,
       endDate: r.endDate,
       daysRemaining: daysLeft,
-      hasAccess: r.status === "active" && !isExpired,
+      hasAccess: canReadRentalAccess(r, r.order, userId, now),
     };
   });
 
