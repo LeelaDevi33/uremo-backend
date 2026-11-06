@@ -10,6 +10,8 @@ const Screening = require("../models/Screening");
 const Project = require("../models/Project");
 const User = require("../models/User");
 const Notification = require("../models/Notification");
+const { withRevision, editRole, roleError, reviewApplication } = require("../services/adminWorkRoles");
+const roleProjects = require("../services/roleProjects");
 
 // ============ JOB ROLE MANAGEMENT ============
 
@@ -47,7 +49,7 @@ exports.getJobRole = async (req, res) => {
 
     res.json({
       ok: true,
-      job,
+      job: withRevision(job),
       stats: {
         totalApplicants: Object.values(countsByStatus).reduce(
           (a, b) => a + b,
@@ -113,48 +115,9 @@ exports.getApplicants = async (req, res) => {
  */
 exports.approveApplicant = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { applicantId } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(applicantId)) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "Invalid applicant ID" });
-    }
-
-    const applicant = await ApplyWork.findOne({
-      _id: applicantId,
-      position: id,
-    });
-
-    if (!applicant) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Applicant not found" });
-    }
-
-    // PATCH_57: Get the job position to check if it has screening
-    const job = await WorkPosition.findById(id)
-      .select("title hasScreening screeningId screeningIds")
-      .lean();
-
-    applicant.status = "approved";
-    applicant.approvedBy = req.user.id;
-    applicant.approvedAt = new Date();
-
-    // PATCH_89: Check both screeningId and screeningIds for screening requirement
-    const hasScreenings =
-      (job?.hasScreening && job?.screeningId) ||
-      (job?.screeningIds && job.screeningIds.length > 0);
-
-    if (hasScreenings) {
-      applicant.workerStatus = "screening_unlocked";
-    } else {
-      // No screening required - worker is ready to work immediately
-      applicant.workerStatus = "ready_to_work";
-    }
-
-    await applicant.save();
+    const { applicant, job, changed } = await reviewApplication(req.body.applicantId, "approved", { roleId: req.params.id, adminId: req.user.id });
+    if (!changed) return res.json({ ok: true, applicant, workerStatus: applicant.workerStatus });
+    const hasScreenings = applicant.workerStatus === "screening_unlocked";
 
     // PATCH_49: Send notification to worker
     try {
@@ -182,7 +145,7 @@ exports.approveApplicant = async (req, res) => {
       workerStatus: applicant.workerStatus,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || 500).json({ ok: false, message: err.message });
   }
 };
 
@@ -192,29 +155,7 @@ exports.approveApplicant = async (req, res) => {
  */
 exports.rejectApplicant = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { applicantId, reason } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(applicantId)) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "Invalid applicant ID" });
-    }
-
-    const applicant = await ApplyWork.findOne({
-      _id: applicantId,
-      position: id,
-    });
-
-    if (!applicant) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Applicant not found" });
-    }
-
-    applicant.status = "rejected";
-    applicant.adminNotes = reason || "";
-    await applicant.save();
+    const { applicant } = await reviewApplication(req.body.applicantId, "rejected", { roleId: req.params.id, adminId: req.user.id, reason: req.body.reason });
 
     res.json({
       ok: true,
@@ -222,7 +163,7 @@ exports.rejectApplicant = async (req, res) => {
       applicant,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || 500).json({ ok: false, message: err.message });
   }
 };
 
@@ -241,29 +182,22 @@ exports.unlockScreening = async (req, res) => {
         .json({ ok: false, message: "Invalid applicant ID" });
     }
 
-    const applicant = await ApplyWork.findOne({
-      _id: applicantId,
-      position: id,
-    });
-
+    const job = await WorkPosition.findById(id).select("title hasScreening screeningId screeningIds").lean();
+    if (!job || (!job.screeningIds?.length && !(job.hasScreening && job.screeningId))) {
+      return res.status(409).json({ ok: false, message: "Attach a screening before unlocking it" });
+    }
+    const applicant = await ApplyWork.findOneAndUpdate({ _id: applicantId, position: id, status: "approved", currentProject: null,
+      workerStatus: { $in: ["applied", "fresh", "screening_available", "ready_to_work"] } },
+      { $set: { workerStatus: "screening_unlocked" } }, { new: true });
     if (!applicant) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Applicant not found" });
+      const existing = await ApplyWork.findOne({ _id: applicantId, position: id });
+      if (!existing) return res.status(404).json({ ok: false, message: "Applicant not found" });
+      if (existing.status === "approved" && existing.workerStatus === "screening_unlocked") return res.json({ ok: true, applicant: existing });
+      return res.status(409).json({ ok: false, message: "Resolve the current assignment or application state before unlocking screening" });
     }
-
-    if (applicant.status !== "approved") {
-      return res
-        .status(400)
-        .json({ ok: false, message: "Must approve applicant first" });
-    }
-
-    applicant.workerStatus = "screening_unlocked";
-    await applicant.save();
 
     // PATCH_49: Send notification to worker
     try {
-      const job = await WorkPosition.findById(id).select("title").lean();
       await Notification.create({
         user: applicant.user,
         title: "Screening Unlocked! 📚",
@@ -299,15 +233,20 @@ exports.setTraining = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Invalid job ID" });
     }
 
-    const job = await WorkPosition.findByIdAndUpdate(
-      id,
-      { trainingMaterials: trainingMaterials || [] },
-      { new: true },
-    );
-
-    if (!job) {
-      return res.status(404).json({ ok: false, message: "Job role not found" });
-    }
+    if (!Array.isArray(trainingMaterials) || trainingMaterials.length > 50) throw roleError(400, "Provide up to 50 training materials");
+    const rows = trainingMaterials.map(material => {
+      const { title, type = "link", url, description = "" } = material || {};
+      if (typeof url !== "string" || url.length > 2048 || !/^https:\/\//i.test(url) ||
+          typeof title !== "string" || !title.trim() || title.length > 160 ||
+          !["link", "pdf", "video"].includes(type) || typeof description !== "string" || description.length > 2000) {
+        throw roleError(400, "Each training material requires a title, supported type and HTTPS URL");
+      }
+      let parsed;
+      try { parsed = new URL(url); } catch { throw roleError(400, "Invalid training URL"); }
+      if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password) throw roleError(400, "Invalid training URL");
+      return { title: title.trim(), type, url: parsed.href, description: description.trim() };
+    });
+    const job = await editRole(id, req.body.expectedRevision, { trainingMaterials: rows });
 
     res.json({
       ok: true,
@@ -315,7 +254,7 @@ exports.setTraining = async (req, res) => {
       job,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || 500).json({ ok: false, message: err.message });
   }
 };
 
@@ -333,60 +272,22 @@ exports.setScreening = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Invalid job ID" });
     }
 
-    const job = await WorkPosition.findById(id);
-    if (!job) {
-      return res.status(404).json({ ok: false, message: "Job role not found" });
-    }
-
-    // PATCH_89: Support multiple screeningIds
-    const update = {};
-
-    if (Array.isArray(screeningIds) && screeningIds.length > 0) {
-      // Validate all IDs
-      const validIds = screeningIds.filter((sid) =>
-        mongoose.Types.ObjectId.isValid(sid),
-      );
-      const existingScreenings = await Screening.find({
-        _id: { $in: validIds },
-      })
-        .select("_id")
-        .lean();
-      const existingIds = existingScreenings.map((s) => s._id.toString());
-
-      update.screeningIds = existingIds;
-      update.screeningId = existingIds[0] || null;
-      update.hasScreening = existingIds.length > 0;
-    } else if (screeningId) {
-      if (!mongoose.Types.ObjectId.isValid(screeningId)) {
-        return res
-          .status(400)
-          .json({ ok: false, message: "Invalid screening ID" });
-      }
-
-      const screeningExists = await Screening.findById(screeningId)
-        .select("_id")
-        .lean();
-      if (!screeningExists) {
-        return res
-          .status(404)
-          .json({ ok: false, message: "Screening not found" });
-      }
-
-      update.screeningId = screeningId;
-      update.screeningIds = [screeningId];
-      update.hasScreening = true;
-    } else {
-      // Clear all screenings
-      update.screeningId = null;
-      update.screeningIds = [];
-      update.hasScreening = false;
-    }
-
-    const updatedJob = await WorkPosition.findByIdAndUpdate(id, update, {
-      new: true,
-    })
-      .populate("screeningId", "title passingScore timeLimit questions")
-      .populate("screeningIds", "title passingScore timeLimit");
+    let ids;
+    if (screeningIds !== undefined) {
+      if (!Array.isArray(screeningIds) || screeningIds.length > 50) throw roleError(400, "Provide a screening list of up to 50 IDs");
+      ids = screeningIds;
+    } else if (screeningId !== undefined) {
+      ids = screeningId === null || screeningId === "" ? [] : [screeningId];
+    } else throw roleError(400, "Provide screeningIds, or an empty list to clear the assignment");
+    if (ids.some(sid => !mongoose.isObjectIdOrHexString(sid))) throw roleError(400, "Invalid screening ID");
+    ids = ids.map(sid => String(sid).toLowerCase());
+    if (new Set(ids).size !== ids.length) throw roleError(400, "A screening can only appear once");
+    if (await Screening.countDocuments({ _id: { $in: ids } }) !== ids.length) throw roleError(404, "A selected screening no longer exists");
+    const update = { screeningIds: ids, screeningId: ids[0] || null, hasScreening: ids.length > 0 };
+    const updatedJob = await editRole(id, req.body.expectedRevision, update);
+    await WorkPosition.populate(updatedJob, [
+      { path: "screeningId", select: "title passingScore timeLimit questions" }, { path: "screeningIds", select: "title passingScore timeLimit" },
+    ]);
 
     res.json({
       ok: true,
@@ -396,7 +297,7 @@ exports.setScreening = async (req, res) => {
       job: updatedJob,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || 500).json({ ok: false, message: err.message });
   }
 };
 
@@ -418,41 +319,7 @@ exports.assignProject = async (req, res) => {
       return res.status(400).json({ ok: false, message: "Invalid project ID" });
     }
 
-    const applicant = await ApplyWork.findOne({
-      _id: applicantId,
-      position: id,
-    });
-
-    if (!applicant) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Applicant not found" });
-    }
-
-    if (!["ready_to_work", "assigned"].includes(applicant.workerStatus)) {
-      return res.status(400).json({
-        ok: false,
-        message: "Worker must be ready_to_work or assigned",
-      });
-    }
-
-    const project = await Project.findByIdAndUpdate(
-      projectId,
-      {
-        assignedTo: applicant.user,
-        assignedAt: new Date(),
-        status: "assigned",
-      },
-      { new: true },
-    );
-
-    if (!project) {
-      return res.status(404).json({ ok: false, message: "Project not found" });
-    }
-
-    applicant.workerStatus = "assigned";
-    applicant.currentProject = project._id;
-    await applicant.save();
+    const { project, worker: applicant } = await roleProjects.assign(projectId, applicantId, id);
 
     res.json({
       ok: true,
@@ -461,7 +328,7 @@ exports.assignProject = async (req, res) => {
       project,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || 500).json({ ok: false, message: err.message });
   }
 };
 
@@ -684,7 +551,7 @@ exports.getJobProjects = async (req, res) => {
 exports.createJobProject = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, payRate, payType, deadline, instructions } =
+    const { title, description, payRate, payType, deadline, instructions, priority } =
       req.body;
 
     const job = await WorkPosition.findById(id).lean();
@@ -698,27 +565,11 @@ exports.createJobProject = async (req, res) => {
         .json({ ok: false, message: "Project title is required" });
     }
 
-    // PATCH_68: Normalize category to valid Project enum values
-    const validCategories = [
-      "microjobs",
-      "writing",
-      "teaching",
-      "coding_math",
-      "outlier",
-      "data_entry",
-      "screener",
-      "other",
-    ];
-    const rawCategory = (job.category || "").toLowerCase().replace(/\s+/g, "_");
-    const category = validCategories.includes(rawCategory)
-      ? rawCategory
-      : "other";
-
-    const project = await Project.create({
+    const project = await roleProjects.createForRole({
       title,
       description: description || "",
-      category,
       instructions: instructions || "",
+      priority: priority || "medium",
       payRate: Number(payRate) || 0,
       payType: payType || "per_task",
       deadline: deadline ? new Date(deadline) : undefined,
@@ -730,7 +581,7 @@ exports.createJobProject = async (req, res) => {
 
     res.status(201).json({ ok: true, project, message: "Project created" });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || (["CastError", "ValidationError"].includes(err.name) ? 400 : 500)).json({ ok: false, message: err.message });
   }
 };
 
@@ -740,21 +591,19 @@ exports.createJobProject = async (req, res) => {
  */
 exports.activateProject = async (req, res) => {
   try {
-    const { projectId } = req.params;
-
-    const project = await Project.findByIdAndUpdate(
-      projectId,
-      { status: "open" },
-      { new: true },
-    );
-
-    if (!project) {
-      return res.status(404).json({ ok: false, message: "Project not found" });
-    }
+    const { projectId, id } = req.params;
+    if (![id, projectId].every(value => mongoose.isObjectIdOrHexString(value))) throw roleError(400, "Invalid role or project ID");
+    const role = await WorkPosition.findById(id).select("category").lean();
+    if (!role) throw roleError(404, "Role not found");
+    const project = await Project.findOneAndUpdate({
+      _id: projectId, status: "draft", assignedTo: null,
+      $or: [{ workPositionId: id }, { workPositionId: null, category: role.category }],
+    }, { $set: { status: "open", workPositionId: id } }, { new: true });
+    if (!project) throw roleError(409, "Only an unassigned draft project belonging to this role can be activated");
 
     res.json({ ok: true, project, message: "Project activated" });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(err.status || 500).json({ ok: false, message: err.message });
   }
 };
 
@@ -762,52 +611,7 @@ exports.activateProject = async (req, res) => {
  * PATCH_47: PUT /api/admin/workspace/job/:id/credit-worker
  * Credit earnings to a worker who completed work
  */
-exports.creditWorker = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { applicantId, amount, note } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(applicantId)) {
-      return res
-        .status(400)
-        .json({ ok: false, message: "Invalid applicant ID" });
-    }
-
-    const applicant = await ApplyWork.findOne({
-      _id: applicantId,
-      position: id,
-    }).populate("user", "name email");
-
-    if (!applicant) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "Applicant not found" });
-    }
-
-    // Credit the earnings
-    const creditAmount = Number(amount) || 0;
-    applicant.totalEarnings = (applicant.totalEarnings || 0) + creditAmount;
-    applicant.pendingEarnings = (applicant.pendingEarnings || 0) + creditAmount;
-
-    // Add to earnings history
-    if (!applicant.earningsHistory) {
-      applicant.earningsHistory = [];
-    }
-    applicant.earningsHistory.push({
-      amount: creditAmount,
-      note: note || "Admin credited earnings",
-      creditedAt: new Date(),
-      creditedBy: req.user.id,
-    });
-
-    await applicant.save();
-
-    res.json({
-      ok: true,
-      message: `Credited $${creditAmount} to ${applicant.user?.name || "worker"}`,
-      applicant,
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
-  }
-};
+exports.creditWorker = (_req, res) => res.status(409).json({
+  ok: false, message: "Credit earnings from the completed, assigned project so the worker receives a wallet receipt.",
+  settlementRoute: "/api/admin/workspace/project/:projectId/credit",
+});

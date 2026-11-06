@@ -21,11 +21,21 @@ function isMoney(value) {
 function validId(id) {
   if (!mongoose.isObjectIdOrHexString(id)) throw error(404, "Opportunity not found");
 }
+function listingTimestamp(item) {
+  return item.updatedAt || item.createdAt || item._id.getTimestamp();
+}
+// Older imports can lack timestamps. Advance by at least 1 ms so two writes in
+// the same clock tick cannot present the same optimistic-lock token.
+async function saveRevision(item, session) {
+  if (item.isNew) return item.save({ session });
+  item.updatedAt = new Date(Math.max(Date.now(), listingTimestamp(item).getTime() + 1));
+  return item.save({ session, timestamps: false });
+}
 function listingView(item, { admin = false, handoff = false } = {}) {
   const availability = item.soldAt ? "sold" : item.rentedUntil > new Date() ? "rented" : "available";
   const result = {
     _id: item._id, title: item.title, description: item.description, category: item.category, status: item.status,
-    revision: item.updatedAt?.toISOString(),
+    revision: listingTimestamp(item).toISOString(),
     availability, applyEnabled: admin ? item.applyEnabled : Boolean(item.applyEnabled && !item.soldAt && item.workPositionId),
     workPositionId: item.workPositionId?._id || item.workPositionId || null,
     rentEnabled: item.rentEnabled, rentPrice: item.rentPrice, rentalDays: item.rentalDays,
@@ -82,13 +92,25 @@ function validateEdit(body) {
 async function saveListing(req, res) {
   const id = req.params.id;
   if (id) validId(id);
-  const patch = validateEdit(req.body);
+  let fields = req.body;
+  let expectedRevision;
+  if (id && fields && typeof fields === "object" && !Array.isArray(fields)) {
+    ({ expectedRevision, ...fields } = fields);
+    if (expectedRevision === undefined) throw error(428, "Reload this listing before saving.");
+    if (typeof expectedRevision !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(expectedRevision)) {
+      throw error(400, "Invalid listing revision");
+    }
+  }
+  const patch = validateEdit(fields);
   if (id && !Object.keys(patch).length) throw error(400, "Include a field to update");
   let saved;
   try {
     saved = await Opportunity.db.transaction(async session => {
       const item = id ? await Opportunity.findById(id).select("+deliverable +preserveRoleUntilPublished").session(session) : new Opportunity();
       if (!item) throw error(404, "Opportunity not found");
+      if (id && expectedRevision !== listingTimestamp(item).toISOString()) {
+        throw error(409, "This listing changed. Reload before saving.");
+      }
       if (item.soldAt && (Object.keys(patch).length !== 1 || patch.status !== "archived")) {
         throw error(409, "A sold opportunity can only be archived");
       }
@@ -122,7 +144,7 @@ async function saveListing(req, res) {
         const linked = await Opportunity.exists({ workPositionId: item.workPositionId, _id: { $ne: item._id } }).session(session);
         if (linked) throw error(409, "That work role is already linked to another opportunity");
       }
-      await item.save({ session });
+      await saveRevision(item, session);
       return item;
     });
   } catch (err) {
@@ -185,7 +207,7 @@ function checkout(type) {
           .select("+deliverable").session(session);
         if (!item) throw error(404, "Opportunity not found");
         if (item.soldAt || item.rentedUntil > now) throw error(409, "This opportunity is already sold or rented");
-        if (expectedRevision !== undefined && expectedRevision !== item.updatedAt?.toISOString()) {
+        if (expectedRevision !== undefined && expectedRevision !== listingTimestamp(item).toISOString()) {
           throw error(409, "The project brief or terms changed. Review the listing again.");
         }
         const isRental = type === "rent";
@@ -198,7 +220,7 @@ function checkout(type) {
         const until = isRental ? new Date(now.getTime() + item.rentalDays * day) : null;
         if (isRental) item.rentedUntil = until;
         else item.soldAt = now;
-        await item.save({ session });
+        await saveRevision(item, session);
 
         const account = await changeFunds(userId, amount, "spend", session);
         const [grant] = await Grant.create([{

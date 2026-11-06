@@ -264,44 +264,28 @@ exports.adminApproveProof = async (req, res) => {
     const { adminNotes } = req.body;
     const adminId = req.user.id;
 
-    const proof = await ProofOfWork.findById(req.params.id);
-    if (!proof) {
-      return res.status(404).json({ message: "Proof not found" });
-    }
-
-    if (proof.status === "approved") {
-      return res.status(400).json({ message: "Proof already approved" });
-    }
-
-    // Update proof status
-    proof.status = "approved";
-    proof.reviewedBy = adminId;
-    proof.reviewedAt = new Date();
-    if (adminNotes) proof.adminNotes = adminNotes;
-    await proof.save();
-
-    // Get project and mark as completed
-    // PATCH_49: Only mark project completed - DO NOT auto-credit earnings
-    // Admin must manually credit earnings via /admin/workspace/project/:id/credit
-    const project = await Project.findById(proof.projectId);
-    if (project) {
-      // Mark completed if not already
+    const result = await Project.db.transaction(async session => {
+      const proof = await ProofOfWork.findById(req.params.id).session(session);
+      if (!proof) return { status: 404, message: "Proof not found" };
+      if (proof.status !== "pending") return { status: 409, message: "Only pending proof can be reviewed" };
+      const project = await Project.findOne({ _id: proof.projectId, assignedTo: proof.workerId,
+        status: { $in: ["assigned", "in_progress", "completed"] } }).session(session);
+      if (!project || (project.workPositionId && !project.workPositionId.equals(proof.jobRoleId))) {
+        return { status: 409, message: "Proof must match the worker and role of a current assignment" };
+      }
+      proof.set({ status: "approved", reviewedBy: adminId, reviewedAt: new Date() });
+      if (adminNotes) proof.adminNotes = adminNotes;
+      await proof.save({ session });
       if (project.status !== "completed") {
-        project.status = "completed";
-        project.completedAt = new Date();
+        project.set({ status: "completed", completedAt: new Date() });
+        await project.save({ session });
       }
-      await project.save();
-
-      // Reset worker status to ready_to_work (so they can be assigned new projects)
-      const worker = await ApplyWork.findOne({ user: proof.workerId });
-      if (worker) {
-        if (worker.currentProject?.toString() === project._id.toString()) {
-          worker.currentProject = null;
-          worker.workerStatus = "ready_to_work";
-        }
-        await worker.save();
-      }
-    }
+      await ApplyWork.updateOne({ user: proof.workerId, currentProject: project._id },
+        { $set: { currentProject: null, workerStatus: "ready_to_work" } }, { session });
+      return { proof };
+    });
+    if (result.message) return res.status(result.status).json({ message: result.message });
+    const { proof } = result;
 
     res.json({
       success: true,
@@ -328,21 +312,9 @@ exports.adminRejectProof = async (req, res) => {
       return res.status(400).json({ message: "Rejection reason required" });
     }
 
-    const proof = await ProofOfWork.findById(req.params.id);
-    if (!proof) {
-      return res.status(404).json({ message: "Proof not found" });
-    }
-
-    if (proof.status === "approved") {
-      return res.status(400).json({ message: "Cannot reject approved proof" });
-    }
-
-    proof.status = "rejected";
-    proof.reviewedBy = adminId;
-    proof.reviewedAt = new Date();
-    proof.rejectionReason = rejectionReason;
-    if (adminNotes) proof.adminNotes = adminNotes;
-    await proof.save();
+    const proof = await ProofOfWork.findOneAndUpdate({ _id: req.params.id, status: "pending" },
+      { $set: { status: "rejected", reviewedBy: adminId, reviewedAt: new Date(), rejectionReason, ...(adminNotes ? { adminNotes } : {}) } }, { new: true });
+    if (!proof) return res.status(409).json({ message: "Only pending proof can be reviewed" });
 
     res.json({
       success: true,
