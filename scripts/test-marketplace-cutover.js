@@ -63,13 +63,14 @@ test("marketplace cutover preserves history and reports only settled project rev
   });
   await t.test("retired creation endpoints reject requests without reserving orders or debiting wallets", async () => {
     for (const path of ["/orders", "/orders/deal", "/rentals/create", "/rentals/" + worker + "/renew",
-      "/payment/checkout", "/payments/checkout", "/wallet/topup/paypal/create", "/service-requests",
+      "/payment/checkout", "/payments/checkout", "/service-requests",
       "/admin/services/create", "/jarvisx/write/execute"]) {
       assert.equal((await request(path, "POST", editor)).status, 410, path);
     }
     assert.equal((await request("/services/marketplace", "GET", null)).status, 410);
     assert.equal(await Order.countDocuments(), 0);
     assert.equal(await Wallet.countDocuments(), 0);
+    assert.equal((await request("/wallet/topup/paypal/create", "POST", editor)).status, 503);
     assert.equal((await (await request("/wallet/topup/paypal/available")).json()).available, false);
     await Order.collection.insertOne({ userId: worker, serviceId: new mongoose.Types.ObjectId(), status: "completed" });
     assert.equal((await (await request("/orders/my")).json()).length, 1);

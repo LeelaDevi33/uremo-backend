@@ -117,3 +117,32 @@ node scripts/review-project-offers.js --db RESTORED_DB --port 27347
 4. Record both deployed commit IDs and visit the staging frontend in Chrome. Check API and socket request destinations, then run `node scripts/test-health-contract.js https://STAGING_API_HOST`. Exercise login, role approval and screening, one rental, one exclusive purchase, and a second buyer using synthetic balances. Verify the receipts and the handoff in the buyer’s profile. If a rollout fails, return the frontend and API to the previously verified revisions. Reconcile transactions before any separate database recovery.
 
 Render checks `/api/health/ready` for database connectivity. Set the production service’s health-check path after the compatible API has deployed there.
+
+## Operate wallet funding
+
+In **Admin → Payments → Wallet funding methods**, choose **Add funding method**. Enter the method name, receiving details and transfer instructions, then activate it when the receiving account is ready. For a manual method such as Binance Pay, specify the supported transfer type, currency, receiving identifier and which transaction ID the sender should enter. Inactive methods disappear from the worker's wallet. An admin can continue reviewing requests that were submitted while the method was active.
+
+A worker chooses the method in **Wallet → Add Balance** and submits the USD amount and transfer reference. In **Admin → Wallet**, match the amount, recipient and reference against the receiving account's settled transaction. Approve with the matching reference or reject the request with a reason. The successful credit records the operator and reference. The same settlement reference can fund only one wallet. Wallet funding is a deposit. Project purchase and rental receipts record marketplace revenue.
+
+PayPal is the supported automatic wallet gateway. The admin page shows its configuration and activation state. Keep the client secret in the backend's environment settings.
+
+1. In the appropriate PayPal developer app, register the HTTPS webhook URL `https://YOUR_API_HOST/api/wallet/topup/paypal/webhook`. Subscribe it to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED`.
+2. Set `PAYPAL_MODE`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_MERCHANT_ID` (the receiving merchant) and `PAYPAL_WEBHOOK_ID` on the backend. Set `FRONTEND_URL` to the exact frontend origin for checkout returns. Use sandbox credentials and `PAYPAL_MODE=sandbox` with `UREMO_ENVIRONMENT=staging`. A production API uses `PAYPAL_MODE=live` and the corresponding live credentials.
+3. Restart the API, open **Admin → Payments**, and enable PayPal. A complete configuration starts paused. The pause control stops new orders and lets previously approved payments settle. Check an actual sandbox payment from the worker wallet before enabling a live account. Verify that both the worker's return and a redelivered webhook yield a single credit.
+
+The API verifies the webhook signature with PayPal and reads the order directly to validate its merchant, wallet transaction, settled USD amount and completed capture. Manual review cannot approve a PayPal transaction. A project refund is a separate admin action on its access receipt. It credits the worker's wallet, revokes project access and leaves the project closed for review.
+
+### Check historical manual funding before rollout
+
+The new partial unique index covers a user's open manual requests with the same method and normalized payment reference. Older amount-only requests without a payment reference fall outside this index and remain reviewable. The API waits for the marketplace indexes before accepting traffic. A conflicting existing record or index stops startup and leaves the original data in place. Use a restored copy to identify duplicate groups with this read-only query. It returns counts without exposing payment references.
+
+```javascript
+db.wallettransactions.aggregate([
+  { $match: { provider: "manual", paymentReference: { $type: "string" }, status: { $in: ["initiated", "pending"] } } },
+  { $group: { _id: { user: "$user", methodId: "$methodId", ref: "$paymentReference" }, count: { $sum: 1 } } },
+  { $match: { count: { $gt: 1 } } },
+  { $count: "duplicatePendingGroups" }
+])
+```
+
+Review any matches against their original payment evidence. Reject duplicate requests individually through the previous admin release, preserving their history and the legitimate transfer. Verify the indexes and reconcile wallets on the restored copy before rollout.

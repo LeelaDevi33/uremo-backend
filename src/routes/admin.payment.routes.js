@@ -10,6 +10,11 @@ const {
 
 const router = express.Router();
 router.use(auth, admin);
+const funding = require("../controllers/walletFunding.controller");
+router.get("/funding", funding.adminMethods);
+router.post("/funding", funding.saveMethod);
+router.patch("/funding/paypal", funding.setPayPalEnabled);
+router.patch("/funding/:id", funding.saveMethod);
 
 router.post("/", retiredGateway);
 router.get("/", getPaymentMethodsAdmin);

@@ -92,6 +92,10 @@ const walletTransactionSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    methodId: { type: mongoose.Schema.Types.ObjectId, ref: "WalletFundingMethod" },
+    methodName: String,
+    paymentReference: String,
+    gatewayMode: { type: String, enum: ["sandbox", "live"] },
     // Admin verification evidence, kept out of user transaction responses.
     settlementReference: { type: String, select: false },
     settlementVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", select: false },
@@ -134,6 +138,9 @@ walletTransactionSchema.index({ status: 1, createdAt: -1 });
 
 // PATCH_80: Index for provider reference lookups (webhook processing)
 walletTransactionSchema.index({ provider: 1, providerRef: 1 });
+walletTransactionSchema.index({ user: 1, methodId: 1, paymentReference: 1 }, {
+  unique: true, partialFilterExpression: { provider: "manual", paymentReference: { $type: "string" }, status: { $in: ["initiated", "pending"] } },
+});
 walletTransactionSchema.index({ settlementReference: 1 }, {
   unique: true, partialFilterExpression: { settlementReference: { $type: "string" } },
 });

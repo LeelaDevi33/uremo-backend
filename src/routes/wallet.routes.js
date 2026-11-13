@@ -10,14 +10,18 @@ const router = express.Router();
 const authMiddleware = require("../middlewares/auth.middleware");
 const walletController = require("../controllers/wallet.controller");
 
-// All routes require authentication
+const funding = require("../controllers/walletFunding.controller");
+const gateway = require("../controllers/walletGateway.controller");
+
+router.post("/topup/paypal/webhook", gateway.webhook);
 router.use(authMiddleware);
+router.get("/funding-methods", funding.workerMethods);
 
 // GET /api/wallet/balance - Get current wallet balance
 router.get("/balance", walletController.getBalance);
 
 // POST /api/wallet/topup - Initiate wallet top-up (PATCH_80: NO instant credit)
-router.post("/topup", walletController.topUp);
+router.post("/topup", funding.submitManual);
 
 // GET /api/wallet/pending - Get user's pending topup requests (PATCH_80)
 router.get("/pending", walletController.getPendingTopups);
@@ -27,13 +31,13 @@ router.post("/cancel-topup", walletController.cancelTopup);
 
 // PATCH_82: PayPal Top-Up Routes
 // GET /api/wallet/topup/paypal/available - Check if PayPal is configured
-router.get("/topup/paypal/available", (_req, res) => res.json({ success: true, available: false }));
+router.get("/topup/paypal/available", gateway.available);
 
 // POST /api/wallet/topup/paypal/create - Create PayPal order for top-up
-router.post("/topup/paypal/create", (_req, res) => res.status(410).json({ message: "New PayPal top-ups are closed. Use a manual wallet top-up request." }));
+router.post("/topup/paypal/create", gateway.create);
 
 // POST /api/wallet/topup/paypal/confirm - Confirm PayPal payment after user approves
-router.post("/topup/paypal/confirm", walletController.confirmPayPalTopup);
+router.post("/topup/paypal/confirm", gateway.confirm);
 
 // GET /api/wallet/transactions - Get transaction history
 router.get("/transactions", walletController.getTransactions);

@@ -9,6 +9,7 @@
  */
 const User = require("../models/User");
 const WalletTransaction = require("../models/WalletTransaction");
+const { paymentReference } = require("../services/walletFunding");
 const Order = require("../models/Order");
 const Rental = require("../models/Rental");
 const { availableFunds, changeFunds, isWalletAmount } = require("../services/walletFunds");
@@ -51,92 +52,6 @@ exports.getBalance = async (req, res) => {
   } catch (err) {
     console.error("getBalance error:", err);
     res.status(500).json({ error: "Failed to get balance" });
-  }
-};
-
-/**
- * PATCH_80: Initiate wallet topup (NO INSTANT CREDIT)
- * PATCH_81: Added duplicate request protection
- * POST /api/wallet/topup
- * Body: { amount }
- *
- * This creates a transaction with status='initiated'.
- * Balance is NOT updated here - it only updates when admin verifies
- * or when payment gateway confirms (future).
- *
- * Flow:
- * 1. User requests topup → status = 'initiated'
- * 2. User pays via gateway (future) or manual verification
- * 3. Admin or webhook verifies → status = 'success', balance updated
- */
-exports.topUp = async (req, res) => {
-  try {
-    const { amount } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Amount must be greater than 0" });
-    }
-
-    const numAmount = typeof amount === "string" ? Number(amount) : amount;
-    if (!isWalletAmount(numAmount) || numAmount < 1) {
-      return res.status(400).json({ error: "Minimum top-up amount is $1" });
-    }
-
-    const userId = req.user.id || req.user._id;
-
-    // Verify user exists
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // PATCH_81: Prevent duplicate rapid requests (within 10 seconds for same amount)
-    const tenSecondsAgo = new Date(Date.now() - 10000);
-    const recentDuplicate = await WalletTransaction.findOne({
-      user: userId,
-      source: "topup",
-      amount: numAmount,
-      status: { $in: ["initiated", "pending"] },
-      createdAt: { $gte: tenSecondsAgo },
-    });
-
-    if (recentDuplicate) {
-      return res.status(409).json({
-        error: "Duplicate request - a similar topup was just submitted",
-        existingTransactionId: recentDuplicate._id,
-        retryAfter: 10000,
-      });
-    }
-
-    // PATCH_80: Create transaction with status='initiated' (NO balance change)
-    const transaction = await WalletTransaction.create({
-      user: userId,
-      type: "credit",
-      amount: numAmount,
-      source: "topup",
-      status: "initiated", // CRITICAL: Not 'success' - no balance change yet
-      provider: "manual", // Phase 1: Manual verification by admin
-      providerRef: null,
-      description: "Wallet top-up (pending verification)",
-      balanceBefore: user.walletBalance || 0,
-      balanceAfter: null, // Will be set when verified
-    });
-
-    // In future: redirect to payment gateway here
-    // For now: user sees "pending" and admin must verify
-
-    res.json({
-      success: true,
-      message: "Top-up request submitted. Pending verification.",
-      transactionId: transaction._id,
-      status: "initiated",
-      amount: numAmount,
-      // DO NOT return updated balance - it hasn't changed
-      currentBalance: user.walletBalance,
-    });
-  } catch (err) {
-    console.error("topUp error:", err);
-    res.status(500).json({ error: "Failed to initiate top-up" });
   }
 };
 
@@ -188,6 +103,7 @@ exports.cancelTopup = async (req, res) => {
         _id: transactionId,
         user: userId,
         source: "topup",
+        provider: { $in: ["manual", "internal", null] },
         status: "initiated", // Only can cancel 'initiated', not 'pending' (in progress)
       },
       {
@@ -208,6 +124,7 @@ exports.cancelTopup = async (req, res) => {
       if (!existingTx) {
         return res.status(404).json({ error: "Transaction not found" });
       }
+      if (existingTx.provider === "paypal") return res.status(409).json({ error: "PayPal manages this payment." });
       if (existingTx.status === "pending") {
         return res.status(400).json({
           error: "Cannot cancel - payment is being processed",
@@ -236,279 +153,6 @@ exports.cancelTopup = async (req, res) => {
     console.error("cancelTopup error:", err);
     res.status(500).json({ error: "Failed to cancel top-up" });
   }
-};
-
-// ============================================================
-// PATCH_82: PayPal Wallet Top-Up (International, Safe Mode)
-// ============================================================
-const {
-  client: paypalClient,
-  paypal,
-  isConfigured: isPayPalConfigured,
-} = require("../config/paypal");
-
-/**
- * PATCH_82: Create PayPal order for wallet top-up
- * POST /api/wallet/topup/paypal/create
- * Body: { amount }
- *
- * Creates a PayPal order and returns the approval URL.
- * Transaction is stored with status='initiated', provider='paypal'.
- * NO wallet credit happens here.
- */
-exports.createPayPalTopup = async (req, res) => {
-  try {
-    // Check if PayPal is configured
-    if (!isPayPalConfigured()) {
-      return res.status(503).json({
-        error: "PayPal is not configured on this server",
-      });
-    }
-
-    const { amount } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Amount must be greater than 0" });
-    }
-
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount < 1) {
-      return res.status(400).json({ error: "Minimum top-up amount is $1" });
-    }
-
-    const userId = req.user.id || req.user._id;
-
-    // Verify user exists
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // PATCH_81: Prevent duplicate rapid requests (within 10 seconds for same amount)
-    const tenSecondsAgo = new Date(Date.now() - 10000);
-    const recentDuplicate = await WalletTransaction.findOne({
-      user: userId,
-      source: "topup",
-      provider: "paypal",
-      amount: numAmount,
-      status: { $in: ["initiated", "pending"] },
-      createdAt: { $gte: tenSecondsAgo },
-    });
-
-    if (recentDuplicate) {
-      return res.status(409).json({
-        error: "Duplicate request - a similar PayPal topup was just submitted",
-        existingTransactionId: recentDuplicate._id,
-        retryAfter: 10000,
-      });
-    }
-
-    // Create PayPal order
-    const request = new paypal.orders.OrdersCreateRequest();
-    request.prefer("return=representation");
-    request.requestBody({
-      intent: "CAPTURE",
-      purchase_units: [
-        {
-          amount: {
-            currency_code: "USD",
-            value: numAmount.toFixed(2),
-          },
-          description: `UREMO Wallet Top-Up - $${numAmount.toFixed(2)}`,
-        },
-      ],
-      application_context: {
-        brand_name: "UREMO",
-        landing_page: "NO_PREFERENCE",
-        user_action: "PAY_NOW",
-        return_url: `${process.env.FRONTEND_URL || "https://uremo.online"}/wallet?paypal=success`,
-        cancel_url: `${process.env.FRONTEND_URL || "https://uremo.online"}/wallet?paypal=cancelled`,
-      },
-    });
-
-    const paypalOrder = await paypalClient.execute(request);
-
-    // Store transaction with PayPal order ID
-    const transaction = await WalletTransaction.create({
-      user: userId,
-      type: "credit",
-      amount: numAmount,
-      source: "topup",
-      status: "initiated", // CRITICAL: Not 'success' - no balance change yet
-      provider: "paypal",
-      providerRef: paypalOrder.result.id, // PayPal Order ID
-      description: "Wallet top-up via PayPal (pending verification)",
-      balanceBefore: user.walletBalance || 0,
-      balanceAfter: null, // Will be set when admin verifies
-    });
-
-    // Get approval URL from PayPal response
-    const approvalLink = paypalOrder.result.links.find(
-      (link) => link.rel === "approve",
-    );
-
-    res.json({
-      success: true,
-      message: "PayPal order created. Redirect user to approve.",
-      transactionId: transaction._id,
-      paypalOrderId: paypalOrder.result.id,
-      approvalUrl: approvalLink?.href,
-      status: "initiated",
-      amount: numAmount,
-      currentBalance: user.walletBalance,
-    });
-  } catch (err) {
-    console.error("createPayPalTopup error:", err);
-    res.status(500).json({
-      error: "Failed to create PayPal order",
-      details: err.message,
-    });
-  }
-};
-
-/**
- * PATCH_82: Confirm PayPal payment (after user approves on PayPal)
- * POST /api/wallet/topup/paypal/confirm
- * Body: { paypalOrderId }
- *
- * Captures the PayPal payment and marks transaction as 'paid_unverified'.
- * STILL NO wallet credit - admin must verify.
- */
-exports.confirmPayPalTopup = async (req, res) => {
-  try {
-    if (!isPayPalConfigured()) {
-      return res.status(503).json({
-        error: "PayPal is not configured on this server",
-      });
-    }
-
-    const { paypalOrderId } = req.body;
-
-    if (!paypalOrderId) {
-      return res.status(400).json({ error: "PayPal Order ID required" });
-    }
-
-    const userId = req.user.id || req.user._id;
-
-    // Find the transaction by PayPal order ID
-    const transaction = await WalletTransaction.findOne({
-      user: userId,
-      provider: "paypal",
-      providerRef: paypalOrderId,
-    });
-
-    if (!transaction) {
-      return res.status(404).json({ error: "Transaction not found" });
-    }
-
-    // Check if already processed
-    if (transaction.status === "paid_unverified") {
-      return res.status(200).json({
-        success: true,
-        message: "Payment already confirmed. Awaiting admin verification.",
-        alreadyConfirmed: true,
-        transactionId: transaction._id,
-        status: transaction.status,
-      });
-    }
-
-    if (transaction.status === "success") {
-      return res.status(200).json({
-        success: true,
-        message: "Transaction already completed.",
-        alreadyProcessed: true,
-        transactionId: transaction._id,
-      });
-    }
-
-    if (transaction.status === "failed") {
-      return res.status(400).json({
-        error: "Transaction was cancelled or failed",
-      });
-    }
-
-    // Capture the PayPal payment
-    const request = new paypal.orders.OrdersCaptureRequest(paypalOrderId);
-    request.requestBody({});
-
-    const capture = await paypalClient.execute(request);
-
-    if (capture.result.status !== "COMPLETED") {
-      // Payment not completed
-      await WalletTransaction.findByIdAndUpdate(transaction._id, {
-        status: "failed",
-        failureReason: `PayPal payment not completed: ${capture.result.status}`,
-      });
-      return res.status(400).json({
-        error: `PayPal payment not completed: ${capture.result.status}`,
-      });
-    }
-
-    // ATOMIC update to paid_unverified (prevents race with webhook)
-    const updatedTx = await WalletTransaction.findOneAndUpdate(
-      {
-        _id: transaction._id,
-        status: { $in: ["initiated", "pending"] },
-      },
-      {
-        $set: {
-          status: "paid_unverified",
-          description: `PayPal payment captured (ID: ${capture.result.id}). Awaiting admin verification.`,
-        },
-      },
-      { new: true },
-    );
-
-    if (!updatedTx) {
-      // Already processed by webhook or another request
-      const existing = await WalletTransaction.findById(transaction._id);
-      return res.status(200).json({
-        success: true,
-        message: "Payment already processed.",
-        transactionId: existing._id,
-        status: existing.status,
-        alreadyProcessed: true,
-      });
-    }
-
-    // CRITICAL: NO wallet balance change here
-    // Balance only updates when admin verifies
-
-    res.json({
-      success: true,
-      message: "PayPal payment confirmed. Awaiting admin verification.",
-      transactionId: updatedTx._id,
-      status: "paid_unverified",
-      amount: updatedTx.amount,
-      // DO NOT return updated balance - it hasn't changed
-    });
-  } catch (err) {
-    console.error("confirmPayPalTopup error:", err);
-
-    // Handle PayPal capture errors
-    if (err.statusCode === 422) {
-      return res.status(400).json({
-        error:
-          "PayPal order cannot be captured. It may be expired or cancelled.",
-      });
-    }
-
-    res.status(500).json({
-      error: "Failed to confirm PayPal payment",
-      details: err.message,
-    });
-  }
-};
-
-/**
- * PATCH_82: Check if PayPal is available
- * GET /api/wallet/topup/paypal/available
- */
-exports.isPayPalAvailable = async (req, res) => {
-  res.json({
-    success: true,
-    available: isPayPalConfigured(),
-  });
 };
 
 /**
@@ -763,6 +407,7 @@ exports.adminGetPendingTopups = async (req, res) => {
     const [pendingTopups, total] = await Promise.all([
       WalletTransaction.find({
         source: "topup",
+        provider: { $in: ["manual", "internal", null] },
         status: { $in: ["initiated", "pending", "paid_unverified"] },
       })
         .populate("user", "name email")
@@ -772,6 +417,7 @@ exports.adminGetPendingTopups = async (req, res) => {
         .lean(),
       WalletTransaction.countDocuments({
         source: "topup",
+        provider: { $in: ["manual", "internal", null] },
         status: { $in: ["initiated", "pending", "paid_unverified"] },
       }),
     ]);
@@ -824,6 +470,7 @@ exports.adminVerifyTopup = async (req, res) => {
       const transaction = await WalletTransaction.findById(transactionId).session(session);
       const fail = (status, message, fields) => { throw Object.assign(new Error(message), { status, fields }); };
       if (!transaction) fail(404, "Transaction not found");
+      if (transaction.provider != null && !["manual", "internal"].includes(transaction.provider)) fail(409, "Gateway payments require confirmation from the provider.");
       if (transaction.source !== "topup") fail(400, "Only topup transactions can be verified");
       if (!["initiated", "pending", "paid_unverified"].includes(transaction.status)) {
         fail(400, "Transaction already processed", { alreadyProcessed: true });
@@ -833,13 +480,12 @@ exports.adminVerifyTopup = async (req, res) => {
       const previousStatus = transaction.status;
       let updatedUser;
       if (action === "approve") {
-        if (transaction.provider === "manual" || transaction.provider === "internal") {
-          const reference = typeof req.body.settlementReference === "string" ? req.body.settlementReference.trim().toUpperCase() : "";
-          if (!/^[A-Z0-9][A-Z0-9._/-]{3,79}$/.test(reference)) {
-            fail(400, "Enter the unique reference from the verified payment record (4–80 letters, digits, dots, slashes, underscores or hyphens).");
-          }
-          transaction.set({ settlementReference: reference, settlementVerifiedBy: req.user.id });
+        const reference = paymentReference(req.body.settlementReference);
+        if (!reference) {
+          fail(400, "Enter the unique reference from the verified payment record (4–80 letters, digits, dots, slashes, underscores or hyphens).");
         }
+        if (transaction.paymentReference && transaction.paymentReference !== reference) fail(400, "The verified payment reference must match the submitted transfer.");
+        transaction.set({ settlementReference: reference, settlementVerifiedBy: req.user.id });
         updatedUser = await changeFunds(user._id, transaction.amount, "credit", session);
         transaction.set({ status: "success", description: "Wallet top-up (verified)",
           balanceBefore: updatedUser.balanceBefore, balanceAfter: updatedUser.walletBalance });
@@ -1358,26 +1004,32 @@ exports.getMyWithdrawals = async (req, res) => {
  */
 exports.adminGetWithdrawals = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, before } = req.query;
     const filter = {};
-    if (
-      status &&
-      ["pending", "approved", "rejected", "paid"].includes(status)
-    ) {
+    if (status) {
+      if (!["pending", "approved", "rejected", "paid"].includes(status)) return res.status(400).json({ error: "Invalid withdrawal status" });
       filter.status = status;
     }
-
-    const withdrawals = await WithdrawalRequest.find(filter)
+    if (before !== undefined) {
+      const parts = typeof before === "string" && /^(none|\d{1,15})\.([a-f\d]{24})$/i.exec(before);
+      if (!parts) return res.status(400).json({ error: "Invalid withdrawal cursor" });
+      const createdAt = parts[1] === "none" ? null : new Date(Number(parts[1]));
+      filter.$or = [{ createdAt, _id: { $lt: parts[2] } }];
+      if (createdAt) filter.$or.push({ createdAt: { $lt: createdAt } }, { createdAt: null });
+    }
+    const rows = await WithdrawalRequest.find(filter)
       .populate(
         "userId",
         "name email walletBalance withdrawable pendingWithdrawals",
       )
       .populate("reviewedBy", "name email")
-      .sort({ createdAt: -1 })
-      .limit(100)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(101)
       .lean();
-
-    res.json({ success: true, withdrawals });
+    const withdrawals = rows.slice(0, 100);
+    const last = withdrawals.at(-1);
+    const nextCursor = rows.length > withdrawals.length ? (last.createdAt?.getTime() ?? "none") + "." + last._id : null;
+    res.json({ success: true, withdrawals, nextCursor });
   } catch (err) {
     console.error("adminGetWithdrawals error:", err);
     res.status(500).json({ error: "Failed to get withdrawals" });

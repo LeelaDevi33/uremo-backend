@@ -653,9 +653,11 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
   await t.test("approved top-ups cannot unlock stale historical withdrawal eligibility or credit twice", async t => {
     const member = await walletFixture(0,25);
     assert.equal((await withdraw(member, 10)).status, 400);
-    const topup = await req("/wallet/topup", member, "POST", { amount: 25 });
-    assert.equal(topup.status, 200);
     const settlementReference = "QA-" + randomUUID();
+    const method = await require("../src/models/WalletFundingMethod").create({ name: "QA", details: "Local only", active: true });
+    const transfer = { methodId: method._id, paymentReference: settlementReference };
+    const topup = await req("/wallet/topup", member, "POST", { amount: 25, ...transfer });
+    assert.equal(topup.status, 200);
     const approve = () => req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: topup.transactionId, settlementReference });
     assert.equal((await req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: topup.transactionId })).status, 400);
     const failure = t.mock.method(Wallet.prototype, "save", async () => { throw Error("Simulated top-up ledger failure"); });
@@ -668,7 +670,7 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal(final.spendable, 25);
     assert.equal(final.withdrawable, 0);
     assert.equal((await withdraw(member, 10)).status, 400);
-    const duplicate = await req("/wallet/topup", member, "POST", { amount: 10 });
+    const duplicate = await req("/wallet/topup", member, "POST", { amount: 10, ...transfer });
     const reused = await req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: duplicate.transactionId, settlementReference: settlementReference.toLowerCase() });
     assert.equal(reused.status, 409);
     assert.equal((await Wallet.findById(duplicate.transactionId)).status, "initiated");
