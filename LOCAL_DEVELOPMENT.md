@@ -1,6 +1,6 @@
 # UREMO local marketplace
 
-Keep the Git checkouts in sibling folders named `frontend` and `backend`. Use Node 22 or later and run `npm ci` in each checkout after cloning. The hosted stack is a Next.js frontend on Vercel, an Express API on Render and MongoDB Atlas. The local preview binds both servers to loopback and uses a separate database.
+Keep the Git checkouts in sibling folders named `frontend` and `backend`. Use Node 24 LTS and run `npm ci` in each checkout after cloning. The hosted stack is a Next.js frontend on Vercel, an Express API on Render and MongoDB Atlas. The local preview binds both servers to loopback and uses a separate database.
 
 ## Open the preview
 

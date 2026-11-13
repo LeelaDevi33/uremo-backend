@@ -1,9 +1,5 @@
-const Order = require("../models/Order");
 const cloudinary = require("../config/cloudinary");
-const {
-  inferResourceType,
-  normalizeCloudinaryUrl,
-} = require("../utils/cloudinaryUrl");
+const { inferResourceType } = require("../utils/cloudinaryUrl");
 const { getFileCategory } = require("../middlewares/upload.middleware");
 
 function serializeUpload(uploadResult) {
@@ -195,50 +191,6 @@ exports.uploadPayment = async (req, res) => {
     );
 
     uploadStream.end(req.file.buffer);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
-  }
-};
-
-exports.uploadProofs = async (req, res) => {
-  try {
-    const { orderId, email, phone } = req.body;
-
-    const order = await Order.findById(orderId);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    // Ownership check
-    if (order.userId.toString() !== req.user.id) {
-      return res.status(403).json({ message: "Access denied" });
-    }
-
-    // Prevent re-upload
-    if (order.documents?.paymentProof) {
-      return res.status(400).json({ message: "Documents already uploaded" });
-    }
-
-    if (!req.files?.paymentProof || !req.files?.senderKyc) {
-      return res.status(400).json({ message: "Both files required" });
-    }
-
-    // NOTE: this legacy endpoint previously stored non-schema fields.
-    // Keep behavior for status/contact, but always store viewable URLs.
-    const paymentProofUrl = normalizeCloudinaryUrl(
-      req.files.paymentProof[0].path,
-    );
-    const senderKycUrl = normalizeCloudinaryUrl(req.files.senderKyc[0].path);
-
-    order.documents = {
-      paymentProof: paymentProofUrl,
-      senderKyc: senderKycUrl,
-    };
-
-    order.contact = { email, phone };
-    order.status = "review";
-
-    await order.save();
-    res.json({ message: "Documents uploaded. Order under review." });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
