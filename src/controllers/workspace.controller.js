@@ -12,6 +12,7 @@ const Screening = require("../models/Screening");
 const Project = require("../models/Project");
 const User = require("../models/User");
 const WorkPosition = require("../models/WorkPosition");
+const screeningRules = require("../services/applicationScreenings");
 const { acquiredProjects } = require("../services/profileProjects");
 const { paidProjectAccess } = require("../services/paidProjectAccess");
 const {
@@ -47,44 +48,8 @@ exports.getWorkspaceProfile = async (req, res) => {
     // Enrich each application with screening/project info
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
-        // Get screening for this position if exists
-        // PATCH_89: Support multiple screenings via screeningIds
-        let screening = null;
-        let requiredScreenings = [];
-
-        if (
-          app.position?.screeningIds &&
-          app.position.screeningIds.length > 0
-        ) {
-          // Multi-screening: load all required screenings
-          requiredScreenings = await Screening.find({
-            _id: { $in: app.position.screeningIds },
-          })
-            .select(
-              "title description timeLimit passingScore trainingMaterials",
-            )
-            .lean();
-          // Keep backward compat — first screening as primary
-          screening = requiredScreenings[0] || null;
-        } else if (app.position?.screeningId) {
-          screening = await Screening.findById(app.position.screeningId)
-            .select(
-              "title description timeLimit passingScore trainingMaterials",
-            )
-            .lean();
-          if (screening) requiredScreenings = [screening];
-        } else if (app.position?.category) {
-          // Fallback: find screening by category
-          screening = await Screening.findOne({
-            category: app.position.category,
-            active: true,
-          })
-            .select(
-              "title description timeLimit passingScore trainingMaterials",
-            )
-            .lean();
-          if (screening) requiredScreenings = [screening];
-        }
+        const requiredScreenings = await screeningRules.requiredSummaries(app.position, app.category);
+        const screening = requiredScreenings[0] || null;
 
         // Get assigned projects for this application
         const assignedProjects = await Project.find({
@@ -230,7 +195,7 @@ exports.markTrainingViewed = async (req, res) => {
     }
 
     // Only allow when status is screening_unlocked
-    if (application.workerStatus !== "screening_unlocked") {
+    if (application.status !== "approved" || !["screening_unlocked", "screening_available"].includes(application.workerStatus)) {
       return res.status(400).json({
         message:
           "Training can only be marked as viewed when screening is unlocked",
@@ -238,6 +203,7 @@ exports.markTrainingViewed = async (req, res) => {
     }
 
     // Update status to training_viewed
+    screeningRules.guardScreeningSave(application);
     application.workerStatus = "training_viewed";
     application.trainingViewedAt = new Date();
     await application.save();
@@ -249,7 +215,8 @@ exports.markTrainingViewed = async (req, res) => {
       workerStatus: application.workerStatus,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -259,31 +226,22 @@ exports.markTrainingViewed = async (req, res) => {
  */
 exports.getAvailableScreenings = async (req, res) => {
   try {
-    const profile = await ApplyWork.findOne({ user: req.user.id }).lean();
-    if (!profile) {
-      return res.json({ screenings: [] });
+    const profiles = await ApplyWork.find({
+      user: req.user.id, status: "approved", workerStatus: { $in: screeningRules.unlocked },
+    }).populate("position", screeningRules.roleFields);
+    const screenings = new Map();
+    for (const profile of profiles) {
+      if (!profile.position && profile.populated("position")) continue;
+      for (const screening of await screeningRules.requiredSummaries(profile.position, profile.category)) {
+        if (!screening.active) continue;
+        const id = String(screening._id);
+        const record = profile.screeningsCompleted.find(result => String(result.screeningId) === id && screeningRules.passedScreening(result));
+        if (!screenings.has(id) || record) screenings.set(id, {
+          ...screening, completed: Boolean(record), completedAt: record?.completedAt,
+        });
+      }
     }
-
-    const screenings = await Screening.find({
-      category: profile.category,
-      active: true,
-    })
-      .select("title description timeLimit passingScore trainingMaterials")
-      .lean();
-
-    // Mark completed ones
-    const completedIds = (profile.screeningsCompleted || []).map((s) =>
-      s.screeningId?.toString(),
-    );
-    const enriched = screenings.map((s) => ({
-      ...s,
-      completed: completedIds.includes(s._id.toString()),
-      completedAt: profile.screeningsCompleted?.find(
-        (sc) => sc.screeningId?.toString() === s._id.toString(),
-      )?.completedAt,
-    }));
-
-    res.json({ screenings: enriched });
+    res.json({ screenings: [...screenings.values()] });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -295,17 +253,15 @@ exports.getAvailableScreenings = async (req, res) => {
  */
 exports.getScreening = async (req, res) => {
   try {
-    const screening = await Screening.findById(req.params.id)
-      .select("-questions.correctAnswer -questions.correctAnswers") // Don't expose answers
-      .lean();
-
-    if (!screening) {
-      return res.status(404).json({ message: "Screening not found" });
-    }
-
+    if (!Screening.base.isObjectIdOrHexString(req.params.id)) return res.status(404).json({ message: "Screening not found" });
+    const screening = await Screening.findOne({ _id: req.params.id, active: true })
+      .select("-questions.correctAnswer -questions.correctAnswers").lean();
+    if (!screening) return res.status(404).json({ message: "Screening not found" });
+    await screeningRules.eligibleApplication(req.user.id, screening._id, req.query.positionId);
     res.json({ screening });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -317,45 +273,14 @@ exports.getScreening = async (req, res) => {
 exports.submitScreening = async (req, res) => {
   try {
     const { answers, positionId } = req.body;
-    const screening = await Screening.findById(req.params.id).lean();
-
-    if (!screening) {
-      return res.status(404).json({ message: "Screening not found" });
+    if (!Screening.base.isObjectIdOrHexString(req.params.id)) return res.status(404).json({ message: "Screening not found" });
+    const screening = await Screening.findOne({ _id: req.params.id, active: true }).lean();
+    if (!screening) return res.status(404).json({ message: "Screening not found" });
+    const { profile, ids } = await screeningRules.eligibleApplication(req.user.id, screening._id, positionId);
+    if (!Array.isArray(answers) || answers.length !== screening.questions.length || !answers.length) {
+      return res.status(400).json({ message: "Provide an answer entry for each screening question." });
     }
-
-    // PATCH_43 + PATCH_57: Find the correct worker profile (for multi-job support)
-    let profile;
-    if (positionId) {
-      profile = await ApplyWork.findOne({
-        _id: positionId,
-        user: req.user.id,
-      });
-      if (!profile) {
-        profile = await ApplyWork.findOne({
-          user: req.user.id,
-          position: positionId,
-        });
-      }
-    } else {
-      profile = await ApplyWork.findOne({ user: req.user.id });
-    }
-
-    if (!profile) {
-      return res.status(400).json({
-        message:
-          "No worker profile found. Please apply to a work position first.",
-        debug: { positionId, userId: req.user.id },
-      });
-    }
-
-    // PATCH_43 + PATCH_49: Check if worker is allowed to take screening
-    const allowedStatuses = ["screening_unlocked", "training_viewed"];
-    if (!allowedStatuses.includes(profile.workerStatus)) {
-      return res.status(400).json({
-        message: `Cannot take screening. Current status: ${profile.workerStatus}. Required: screening_unlocked or training_viewed.`,
-      });
-    }
-
+    screeningRules.guardScreeningSave(profile);
     // PATCH_90: Run hybrid auto-validation engine
     const {
       autoScore,
@@ -391,39 +316,13 @@ exports.submitScreening = async (req, res) => {
       answers: answers,
     };
 
-    // PATCH_90: Determine worker status based on evaluation mode
+    profile.screeningsCompleted.push(completionRecord);
+    const submission = profile.screeningsCompleted[profile.screeningsCompleted.length - 1];
     if (evaluationMode === "auto") {
-      // Pure auto: same as old behavior
-      completionRecord.passed = autoPass;
-      completionRecord.submissionStatus = autoPass ? "approved" : "auto_graded";
-
+      submission.passed = autoPass;
+      submission.submissionStatus = autoPass ? "approved" : "auto_graded";
       if (autoPass) {
-        // Check multi-screening requirement
-        const jobRole = await WorkPosition.findById(profile.position)
-          .select("screeningIds screeningId hasScreening")
-          .lean();
-        const requiredIds = (jobRole?.screeningIds || []).map((id) =>
-          id.toString(),
-        );
-
-        // Add current to completed list for checking
-        const allPassedIds = [
-          ...(profile.screeningsCompleted || [])
-            .filter((sc) => sc.passed !== false)
-            .map((sc) => sc.screeningId?.toString()),
-          screening._id.toString(),
-        ];
-
-        if (requiredIds.length > 1) {
-          const allPassed = requiredIds.every((rid) =>
-            allPassedIds.includes(rid),
-          );
-          profile.workerStatus = allPassed
-            ? "ready_to_work"
-            : "screening_unlocked";
-        } else {
-          profile.workerStatus = "ready_to_work";
-        }
+        profile.workerStatus = screeningRules.afterPassing(profile, ids);
 
         // PATCH_90: Apply quality score impact on auto-pass
         applyScreeningQualityImpact(profile, autoScore);
@@ -437,19 +336,17 @@ exports.submitScreening = async (req, res) => {
     } else {
       // hybrid or manual: DO NOT advance worker status
       // Leave as test_submitted → admin must review
-      completionRecord.passed = null; // pending admin decision
-      completionRecord.submissionStatus = "pending_review";
+      submission.passed = null;
+      submission.submissionStatus = "pending_review";
       profile.workerStatus = "test_submitted";
     }
-
-    profile.screeningsCompleted.push(completionRecord);
     await profile.save();
 
     // Build response message
     let message;
     if (evaluationMode === "auto") {
       if (autoPass) {
-        message = "Congratulations! You passed and are now ready to work.";
+        message = profile.workerStatus === "ready_to_work" ? "You passed all required screenings and are ready to work." : "You passed this screening. Complete the remaining role screenings.";
       } else if (profile.attemptCount < maxAttempts) {
         message = `You scored ${score}%. You have ${maxAttempts - profile.attemptCount} attempt(s) remaining.`;
       } else {
@@ -470,8 +367,8 @@ exports.submitScreening = async (req, res) => {
       autoScore,
       autoPass,
       evaluationMode,
-      submissionStatus: completionRecord.submissionStatus,
-      passed: completionRecord.passed,
+      submissionStatus: submission.submissionStatus,
+      passed: submission.passed,
       attemptsUsed: profile.attemptCount,
       attemptsRemaining: Math.max(0, maxAttempts - profile.attemptCount),
       newStatus: profile.workerStatus,
@@ -480,7 +377,8 @@ exports.submitScreening = async (req, res) => {
       message,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -802,26 +700,28 @@ exports.adminGetQualifiedWorkerCounts = async (req, res) => {
 exports.adminGetWorkerById = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const worker = await ApplyWork.findById(id)
-      .populate("user", "firstName lastName name email phone avatar createdAt")
-      .populate("position", "title category description payRate")
-      .lean();
+    if (!ApplyWork.base.isObjectIdOrHexString(id)) return res.status(404).json({ message: "Worker not found" });
+    // Older operator links used account IDs. The current link identifies a
+    // specific application even when the account has several specializations.
+    const detail = query => query.populate("user", "firstName lastName name email phone avatar createdAt")
+      .populate("position", "title category description payRate").lean();
+    const worker = await detail(ApplyWork.findById(id)) ||
+      await detail(ApplyWork.findOne({ user: id }).sort({ createdAt: -1, _id: -1 }));
 
     if (!worker) {
       return res.status(404).json({ message: "Worker not found" });
     }
 
     // Get all projects assigned to this worker
-    const projects = await Project.find({ assignedTo: worker.user?._id })
+    const projects = worker.user ? await Project.find({ assignedTo: worker.user._id })
       .sort({ createdAt: -1 })
-      .lean();
+      .lean() : [];
 
     // Get all applications for this user
-    const applications = await ApplyWork.find({ user: worker.user?._id })
+    const applications = worker.user ? await ApplyWork.find({ user: worker.user._id })
       .populate("position", "title category")
       .sort({ createdAt: -1 })
-      .lean();
+      .lean() : [worker];
 
     // Build activity log
     const activityLog = [];
@@ -1405,6 +1305,15 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
       });
     }
 
+    if (profile.status !== "approved" || !["test_submitted", "screening_unlocked", "training_viewed", "screening_available"].includes(profile.workerStatus)) {
+      return res.status(409).json({ message: "The application is no longer available for screening review." });
+    }
+    const role = profile.position ? await WorkPosition.findById(profile.position).select(screeningRules.roleFields).lean() : null;
+    const required = await screeningRules.requiredScreeningIds(role, profile.category);
+    if ((profile.position && !role) || !required.includes(String(submission.screeningId))) {
+      return res.status(409).json({ message: "This screening is no longer assigned to the application." });
+    }
+    screeningRules.guardScreeningSave(profile);
     submission.adminReviewedBy = req.user.id;
     submission.adminReviewedAt = new Date();
 
@@ -1426,32 +1335,7 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
         submission.autoScore || submission.score || 0,
       );
 
-      // Check if ALL required screenings passed
-      const jobRole = await WorkPosition.findById(profile.position)
-        .select("screeningIds screeningId hasScreening")
-        .lean();
-
-      const requiredIds = (jobRole?.screeningIds || []).map((id) =>
-        id.toString(),
-      );
-
-      const allPassedIds = (profile.screeningsCompleted || [])
-        .filter(
-          (sc) => sc.passed === true || sc.submissionStatus === "approved",
-        )
-        .map((sc) => sc.screeningId?.toString());
-
-      if (requiredIds.length > 1) {
-        const allPassed = requiredIds.every((rid) =>
-          allPassedIds.includes(rid),
-        );
-        profile.workerStatus = allPassed
-          ? "ready_to_work"
-          : "screening_unlocked";
-      } else {
-        profile.workerStatus = "ready_to_work";
-      }
-
+      profile.workerStatus = screeningRules.afterPassing(profile, required);
       if (profile.workerStatus === "ready_to_work") {
         profile.approvedBy = req.user.id;
         profile.approvedAt = new Date();
@@ -1502,7 +1386,8 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
       submissionStatus: submission.submissionStatus,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 

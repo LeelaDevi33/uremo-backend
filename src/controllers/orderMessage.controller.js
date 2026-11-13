@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const OrderMessage = require("../models/OrderMessage");
+const { liveAdminIds } = require("../services/tokenIdentity");
 const { orderChatDenial } = require("../services/orderChatPolicy");
 
 // In-memory SSE subscribers: orderId -> Set(res)
@@ -22,7 +23,7 @@ function removeSubscriber(orderId, res) {
   if (set.size === 0) subscribersByOrderId.delete(key);
 }
 
-function broadcastMessage(order, payload) {
+async function broadcastMessage(order, payload) {
   const key = String(order._id);
   const set = subscribersByOrderId.get(key);
   if (!set || set.size === 0) return;
@@ -30,10 +31,12 @@ function broadcastMessage(order, payload) {
   const eventId = payload?._id ? String(payload._id) : String(Date.now());
   // Default event type is "message" when no `event:` line is provided.
   const data = `id: ${eventId}\ndata: ${JSON.stringify(payload)}\n\n`;
-  for (const res of Array.from(set)) {
+  const recipients = [...set];
+  const admins = await liveAdminIds(recipients.map(res => res.req.user));
+  for (const res of recipients) {
     try {
       const user = res.req.user;
-      if (orderChatDenial(order, user?.id, user?.role === "admin")) {
+      if ((user?.exp && user.exp * 1000 <= Date.now()) || orderChatDenial(order, user?.id, admins.has(String(user?.id)))) {
         set.delete(res);
         res.end();
         continue;
@@ -246,24 +249,12 @@ exports.postOrderMessage = async (req, res) => {
       seenAt: created.seenAt || null,
     };
 
-    // Broadcast to all SSE subscribers for this order
-    broadcastMessage(order, payload);
-
-    // Best-effort Socket.IO broadcast (so REST fallback still updates realtime chat)
+    // The message is durable even if a live recipient cannot be revalidated.
     try {
-      const { getIO, broadcastOrderMessage } = require("../socket");
-      const io = getIO();
-      if (io) {
-        broadcastOrderMessage(order, payload);
-        if (senderRole === "user") {
-          io.to("admin:orders").emit("admin:order_message", {
-            orderId: String(order._id),
-            message: payload,
-          });
-        }
-      }
-    } catch {
-      // ignore broadcast errors
+      const { broadcastOrderMessage } = require("../socket");
+      await Promise.all([broadcastMessage(order, payload), broadcastOrderMessage(order, payload)]);
+    } catch (err) {
+      console.warn("[CHAT_BROADCAST_FAIL]", err.name);
     }
 
     return res.status(201).json(payload);

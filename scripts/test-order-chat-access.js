@@ -6,6 +6,7 @@ const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const Order = require("../src/models/Order");
 const OrderMessage = require("../src/models/OrderMessage");
+const User = require("../src/models/User");
 const { initSocket } = require("../src/socket");
 const { orderChatDenial } = require("../src/services/orderChatPolicy");
 
@@ -56,7 +57,7 @@ test("joined sockets recheck status, ownership and recipients for every new mess
   const db = "uremo_order_chat_test_" + randomUUID().replaceAll("-", "");
   await mongoose.connect(`mongodb://127.0.0.1:${port}/${db}?directConnection=true`, { serverSelectionTimeoutMS: 5000 });
   t.after(async () => { await mongoose.connection.dropDatabase(); await mongoose.disconnect(); });
-  const server = http.createServer();
+  const server = http.createServer(require("../src/app"));
   const io = initSocket(server);
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => io.close(resolve)));
@@ -66,7 +67,10 @@ test("joined sockets recheck status, ownership and recipients for every new mess
   const orderId = String(order.insertedId);
   const worker = await client(base, { id: String(owner), role: "user" });
   const stranger = await client(base, { id: String(new mongoose.Types.ObjectId()), role: "user" });
-  const admin = await client(base, { id: String(new mongoose.Types.ObjectId()), role: "admin" });
+  const adminId = new mongoose.Types.ObjectId();
+  const adminClaims = { id: String(adminId), role: "admin" };
+  await User.collection.insertOne({ _id: adminId, role: "admin", email: "admin@example.test" });
+  const admin = await client(base, adminClaims);
   assert.equal((await worker.send("join:order", { orderId })).error, "CHAT_UNAVAILABLE");
   assert.equal((await stranger.send("join:order", { orderId })).error, "FORBIDDEN");
   assert.ok((await admin.send("admin:join_orders", {})).ok);
@@ -80,4 +84,17 @@ test("joined sockets recheck status, ownership and recipients for every new mess
   assert.ok(!worker.events.some(([name, payload]) => name === "message:new" && payload.message === "Staff response after closure"));
   assert.equal(await OrderMessage.countDocuments({ orderId }), 2);
   assert.equal((await worker.send("join:order", { orderId })).error, "CHAT_UNAVAILABLE");
+  await User.updateOne({ _id: adminId }, { role: "user" });
+  await Order.updateOne({ _id: orderId }, { status: "in_progress" });
+  assert.ok((await worker.send("join:order", { orderId })).ok);
+  assert.ok((await worker.send("message:send", { orderId, text: "Private after demotion" })).ok);
+  assert.equal((await admin.send("admin:join_orders", {})).error, "FORBIDDEN");
+  assert.ok(!admin.events.some(([, payload]) => payload.message === "Private after demotion" ||
+    payload.message?.message === "Private after demotion"));
+  assert.equal((await admin.send("join:order", { orderId })).error, "FORBIDDEN");
+  const token = jwt.sign(adminClaims, process.env.JWT_SECRET);
+  const response = await fetch("http://127.0.0.1:" + server.address().port + "/api/orders/" + orderId + "/messages", {
+    headers: { Authorization: "Bearer " + token },
+  });
+  assert.equal(response.status, 403);
 });

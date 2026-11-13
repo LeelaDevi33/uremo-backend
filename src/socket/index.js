@@ -1,3 +1,4 @@
+const { tokenIdentity, liveAdminIds } = require("../services/tokenIdentity");
 /**
  * Socket.io server setup and event handlers for realtime chat.
  */
@@ -73,13 +74,7 @@ function initSocket(httpServer) {
         return next(new Error("Server configuration error"));
       }
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const normalized = {
-        ...(decoded && typeof decoded === "object" ? decoded : {}),
-      };
-      normalized.id =
-        normalized.id || normalized._id || normalized.userId || normalized.uid;
-
-      socket.user = normalized;
+      socket.user = await tokenIdentity(decoded);
       next();
     } catch (err) {
       pushSocketLog("SOCKET_AUTH_FAIL", { error: "AUTH_FAILED" });
@@ -98,8 +93,24 @@ function initSocket(httpServer) {
  */
 async function handleConnection(socket) {
   const userId = socket.user?.id;
-  const userRole = socket.user?.role;
-  const isAdmin = userRole === "admin";
+  let userRole = socket.user.role;
+  let isAdmin = userRole === "admin";
+  // Long-lived connections also revalidate privileges after the handshake.
+  socket.use(async (_packet, next) => {
+    try {
+      if (socket.user.exp && socket.user.exp * 1000 <= Date.now()) return socket.disconnect(true);
+      if (isAdmin && !(await liveAdminIds([socket.user])).has(String(userId))) {
+        leaveOrder();
+        socket.leave("admin:orders");
+        socket.join("order-chat:workers");
+        userRole = socket.user.role = "user";
+        isAdmin = false;
+      }
+      next();
+    } catch {
+      socket.disconnect(true);
+    }
+  });
 
   function leaveOrder() {
     if (socket.currentOrderRoom) {
@@ -317,15 +328,13 @@ async function handleConnection(socket) {
 
       safeAck(ack, { ok: true, message: payload });
 
-      broadcastOrderMessage(order, payload);
-
-      // Notify admins globally (only when a user sends a message)
-      if (senderRole === "user") {
-        io.to("admin:orders").emit("admin:order_message", {
-          orderId,
-          message: payload,
-        });
+      try {
+        await broadcastOrderMessage(order, payload);
+      } catch (err) {
+        console.warn("[CHAT_BROADCAST_FAIL]", err.name);
       }
+
+
     } catch (err) {
       pushSocketLog("SOCKET_SEND_FAIL", {
         userId,
@@ -457,12 +466,25 @@ function getIO() {
   return io;
 }
 
-function broadcastOrderMessage(order, payload) {
+async function broadcastOrderMessage(order, payload) {
   if (!io) return;
   const room = "order:" + order._id;
-  io.to(room).except("order-chat:workers").emit("message:new", payload);
-  if (!orderChatDenial(order, order.userId, false)) {
-    io.to(room + ":user:" + order.userId).emit("message:new", payload);
+  const listeners = new Set(io.sockets.adapter.rooms.get(room) || []);
+  if (payload.senderRole === "user") {
+    for (const id of io.sockets.adapter.rooms.get("admin:orders") || []) listeners.add(id);
+  }
+  const sockets = [...listeners].map(id => io.sockets.sockets.get(id)).filter(Boolean);
+  const admins = await liveAdminIds(sockets.map(socket => socket.user));
+  for (const socket of sockets) {
+    if (socket.user.exp && socket.user.exp * 1000 <= Date.now()) {
+      socket.disconnect(true);
+      continue;
+    }
+    const isAdmin = admins.has(String(socket.user.id));
+    if (socket.rooms.has(room) && !orderChatDenial(order, socket.user.id, isAdmin)) socket.emit("message:new", payload);
+    if (isAdmin && payload.senderRole === "user" && socket.rooms.has("admin:orders")) {
+      socket.emit("admin:order_message", { orderId: String(order._id), message: payload });
+    }
   }
 }
 

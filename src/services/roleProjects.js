@@ -5,6 +5,7 @@ const Opportunity = require("../models/Opportunity");
 const WalletTransaction = require("../models/WalletTransaction");
 const { changeFunds, isWalletAmount } = require("./walletFunds");
 const { roleError } = require("./adminWorkRoles");
+const { passedScreening } = require("./applicationScreenings");
 
 function meetsScreenings(worker, project, role) {
   const required = [project.screeningId, ...(project.screeningIds || [])];
@@ -12,8 +13,7 @@ function meetsScreenings(worker, project, role) {
     if (!role.screeningId && !role.screeningIds?.length) return false;
     required.push(role.screeningId, ...(role.screeningIds || []));
   }
-  const passed = new Set((worker.screeningsCompleted || []).filter(s => s.submissionStatus === "approved" ||
-    s.passed === true && !["pending_review", "rejected"].includes(s.submissionStatus)).map(s => String(s.screeningId)));
+  const passed = new Set((worker.screeningsCompleted || []).filter(passedScreening).map(s => String(s.screeningId)));
   return required.filter(Boolean).every(id => passed.has(String(id)));
 }
 

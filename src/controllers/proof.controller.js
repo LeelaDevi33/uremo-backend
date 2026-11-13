@@ -67,9 +67,17 @@ exports.submitProof = async (req, res) => {
     }
 
     // Get worker's job role
-    const workerProfile = await ApplyWork.findOne({ user: workerId });
-    if (!workerProfile) {
-      return res.status(400).json({ message: "Worker profile not found" });
+    const assignment = { user: workerId };
+    if (project.workPositionId) assignment.position = project.workPositionId;
+    else assignment.currentProject = project._id;
+    let profile = await ApplyWork.findOne(assignment).select("position").lean();
+    if (!project.workPositionId && !profile) {
+      // Unlinked historical projects can only use an unambiguous role.
+      const candidates = await ApplyWork.find({ user: workerId, position: { $ne: null } }).select("position").limit(2).lean();
+      if (candidates.length === 1) profile = candidates[0];
+    }
+    if (!profile?.position) {
+      return res.status(409).json({ message: "This project requires a matching worker role before proof can be submitted." });
     }
 
     // Check if proof already exists
@@ -90,6 +98,7 @@ exports.submitProof = async (req, res) => {
       }
 
       // Update rejected proof for resubmission
+      existingProof.jobRoleId = profile.position;
       existingProof.submissionText = text;
       existingProof.attachments = normalizedAttachments;
       existingProof.status = "pending";
@@ -108,7 +117,7 @@ exports.submitProof = async (req, res) => {
     // Create new proof
     const proof = await ProofOfWork.create({
       workerId,
-      jobRoleId: workerProfile.jobId || workerProfile.position,
+      jobRoleId: profile.position,
       projectId,
       submissionText: text,
       attachments: normalizedAttachments,
@@ -193,13 +202,17 @@ exports.getMyProofs = async (req, res) => {
  */
 exports.adminGetProofs = async (req, res) => {
   try {
-    const { status, page = 1, limit = 20 } = req.query;
+    const { workerId, status, page = 1, limit = 20 } = req.query;
+    if (workerId !== undefined && !ProofOfWork.base.isObjectIdOrHexString(workerId)) {
+      return res.status(400).json({ message: "Invalid worker ID" });
+    }
 
-    const filter = {};
+    const worker = workerId ? { workerId } : {};
+    const filter = { ...worker };
     if (status) filter.status = status;
 
     const proofs = await ProofOfWork.find(filter)
-      .populate("workerId", "firstName lastName email")
+      .populate("workerId", "name email")
       .populate("projectId", "title payRate payType status earningsCredited")
       .populate("jobRoleId", "title")
       .populate("reviewedBy", "firstName lastName")
@@ -212,9 +225,9 @@ exports.adminGetProofs = async (req, res) => {
 
     // Count by status
     const stats = {
-      pending: await ProofOfWork.countDocuments({ status: "pending" }),
-      approved: await ProofOfWork.countDocuments({ status: "approved" }),
-      rejected: await ProofOfWork.countDocuments({ status: "rejected" }),
+      pending: await ProofOfWork.countDocuments({ ...worker, status: "pending" }),
+      approved: await ProofOfWork.countDocuments({ ...worker, status: "approved" }),
+      rejected: await ProofOfWork.countDocuments({ ...worker, status: "rejected" }),
     };
 
     res.json({

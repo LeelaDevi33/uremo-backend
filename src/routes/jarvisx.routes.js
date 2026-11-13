@@ -1,3 +1,4 @@
+const { tokenIdentity } = require("../services/tokenIdentity");
 /**
  * JarvisX Routes - Core Brain Architecture
  *
@@ -28,7 +29,7 @@ const {
 } = require("../middlewares/jarvisxRateLimiter");
 
 // Optional auth - attaches user if token present but doesn't require it
-const optionalAuth = (req, res, next) => {
+const optionalAuth = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1] || req.cookies?.token;
   if (!token) {
     return next();
@@ -37,7 +38,7 @@ const optionalAuth = (req, res, next) => {
   try {
     const jwt = require("jsonwebtoken");
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    req.user = await tokenIdentity(decoded);
   } catch (e) {
     // Invalid token - continue as guest
   }

@@ -1,3 +1,4 @@
+const { tokenIdentity } = require("../services/tokenIdentity");
 const jwt = require("jsonwebtoken");
 
 function extractToken(req) {
@@ -6,7 +7,7 @@ function extractToken(req) {
   return null;
 }
 
-module.exports = (req, _res, next) => {
+module.exports = async (req, _res, next) => {
   const token = extractToken(req);
   if (!token) return next();
 
@@ -14,12 +15,7 @@ module.exports = (req, _res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const normalized = {
-      ...(decoded && typeof decoded === "object" ? decoded : {}),
-    };
-    normalized.id =
-      normalized.id || normalized._id || normalized.userId || normalized.uid;
-    req.user = normalized;
+    req.user = await tokenIdentity(decoded);
   } catch {
     // Optional auth: ignore invalid token
   }
