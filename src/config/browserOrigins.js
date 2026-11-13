@@ -1,4 +1,5 @@
-const allowedOrigins = new Set([
+const staging = process.env.UREMO_ENVIRONMENT === "staging";
+const allowedOrigins = new Set(staging ? [] : [
   "https://uremo-frontend.vercel.app",
   "https://uremo-frontend-git-main-uremos-projects.vercel.app",
   "http://localhost:3000",

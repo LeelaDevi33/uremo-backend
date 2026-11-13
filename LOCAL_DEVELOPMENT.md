@@ -82,3 +82,30 @@ node --test --test-concurrency=2 @suite
 On a restored local copy, run `node scripts/review-project-offers.js --db LOCAL_DATABASE --port 27347` to count offers that need review and historical receipts lacking a project association. The command reads counts only. The old role-to-offer import command is retired.
 
 Review historical offers in Admin. For an unsettled offer, identify its actual project and save a draft before publishing new access terms. Keep settled legacy receipts and their original handoffs. Create a fresh offer for a separately verified project when appropriate. A role or a matching title alone cannot establish the identity of a purchased project. Verify the unique project-offer and exclusive-sale indexes on the restored copy before releasing.
+
+## Rehearse backup recovery
+
+Install MongoDB Database Tools and point the following command at the directory containing `mongodump` and `mongorestore`. The drill creates a paid exclusive sale in a fresh synthetic database, stops the source API, writes a compressed native archive, and restores it into a second fresh database. It verifies the unique offer, exclusive purchase and wallet indexes before starting the recovered API. It then replays the original request, tests a competing buyer, checks the project handoff and balances, and removes its fixtures.
+
+```powershell
+$env:UREMO_TEST_MONGO_PORT = '27347'
+$env:UREMO_MONGO_TOOLS_DIR = Split-Path (Get-Command mongodump).Source
+node --test scripts/test-opportunity-restore.js
+```
+
+For Atlas disaster recovery, select an available backup of the source cluster in the Atlas Backup view. Restore to a separate compatible cluster owned by this workspace. Record the snapshot time and completed restore time. Keep real customer records in this restricted recovery environment. Run read-only index and wallet reconciliation checks before directing the candidate to it. On a locally restored copy, the following commands use the local loopback interface and print aggregate results.
+
+```powershell
+node scripts/verify-marketplace-indexes.js --db RESTORED_DB --port 27347
+node scripts/reconcile-wallets.js --db RESTORED_DB --port 27347
+node scripts/review-project-offers.js --db RESTORED_DB --port 27347
+```
+
+## Host an isolated staging release
+
+1. Create the separate `uremo_staging` database on an Atlas deployment that supports transactions. Give the staging database user access to this database only. Use synthetic accounts and project handoffs. For Atlas network rules, allow the staging Render service’s documented outbound addresses.
+2. In the confirmed Render workspace, select the backend repository’s candidate branch and Blueprint path `render.staging.yaml`. Enter the staging database’s SRV connection string with `/uremo_staging` in the path and the exact HTTPS frontend staging origin as `FRONTEND_URL`. The Blueprint creates a separate free service and JWT secret, with manual subsequent deploys. Set a supported Node version for the dependency lockfile in the service configuration.
+3. In Vercel, configure the Preview environment for the candidate branch (or a separate staging project's environment) before the frontend build. Set `NEXT_PUBLIC_API_URL` and `JARVISX_BACKEND_URL` to the staging API origin. Use the same staging endpoint for `NEXT_PUBLIC_SOCKET_URL` if overriding Socket.IO. Set `NEXT_PUBLIC_SITE_URL` to the staging frontend origin. Set `UREMO_ENVIRONMENT=staging` when using a standalone staging project's Production environment. Update the Render frontend origin if Vercel assigns a different stable branch URL. Rebuild the frontend after changing a public variable.
+4. Record both deployed commit IDs and visit the staging frontend in Chrome. Check API and socket request destinations, then run `node scripts/test-health-contract.js https://STAGING_API_HOST`. Exercise login, role approval and screening, one rental, one exclusive purchase, and a second buyer using synthetic balances. Verify the receipts and the handoff in the buyer’s profile. If a rollout fails, return the frontend and API to the previously verified revisions. Reconcile transactions before any separate database recovery.
+
+Render checks `/api/health/ready` for database connectivity. Set the production service’s health-check path after the compatible API has deployed there.

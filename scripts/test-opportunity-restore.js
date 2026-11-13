@@ -1,7 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 const { once } = require("node:events");
 const { mkdtemp, readFile, writeFile, rm, rmdir } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
@@ -9,6 +10,8 @@ const path = require("node:path");
 const jwt = require("jsonwebtoken");
 const { MongoClient, BSON, ObjectId } = require("mongoose").mongo;
 const { connectionArgs } = require("./reconcile-wallets");
+const { verifyMarketplaceIndexes } = require("./verify-marketplace-indexes");
+const runTool = promisify(execFile);
 
 // Restore the offer, project and role, as well as its wallet and grant history,
 // into a fresh test database and boot a new process so cached state cannot help.
@@ -45,7 +48,7 @@ async function launch(uri, secret, t) {
 }
 
 const port = process.env.UREMO_TEST_MONGO_PORT;
-test("a logical marketplace restore into a fresh API process preserves sale, access, wallet and retry history", { skip: !port, timeout: 90000 }, async t => {
+test("a logical marketplace restore into a fresh API process preserves sale, access, wallet and retry history", { skip: !port, timeout: process.env.UREMO_MONGO_TOOLS_DIR ? 240000 : 90000 }, async t => {
   const dbName = () => "uremo_test_" + randomUUID().replaceAll("-", "");
   const sourceName = dbName(), restoredName = dbName();
   const { uri } = connectionArgs(["--db", sourceName, "--port", port]);
@@ -57,6 +60,7 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
   const collections = ["users", "projects", "workpositions", "opportunities", "opportunitygrants", "wallettransactions"];
   t.after(async () => {
     for (const name of collections) await rm(path.join(dir, name + ".bson"), { force: true });
+    await rm(path.join(dir, "marketplace.archive.gz"), { force: true });
     await rmdir(dir);
   });
   const secret = randomUUID();
@@ -78,12 +82,35 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
   const bought = await service.call("POST", "/" + listing + "/buy", token(buyer), purchase);
   assert.equal(bought.status, 201);
   await service.stop(); // Quiesce the source before backing up its documents.
-  for (const name of collections) {
-    const docs = await from.collection(name).find().toArray();
-    assert.ok(docs.length);
-    const file = path.join(dir, name + ".bson");
-    await writeFile(file, BSON.serialize({ docs }));
-    await to.collection(name).insertMany(BSON.deserialize(await readFile(file)).docs);
+  const toolsDir = process.env.UREMO_MONGO_TOOLS_DIR;
+  if (toolsDir) {
+    const executable = name => path.resolve(toolsDir, name + (process.platform === "win32" ? ".exe" : ""));
+    const archive = "--archive=" + path.join(dir, "marketplace.archive.gz");
+    const options = { windowsHide: true, timeout: 45000 };
+    await runTool(executable("mongodump"), ["--uri", uri, "--db", sourceName, archive, "--gzip"], options);
+    await runTool(executable("mongorestore"), ["--uri", uri, archive, "--gzip", "--stopOnError",
+      "--nsInclude", sourceName + ".*", "--nsFrom", sourceName + ".*", "--nsTo", restoredName + ".*"], options);
+    const restoredIndexes = await verifyMarketplaceIndexes(to); // Check before the API can create indexes.
+    for (const [collection, fields] of [
+      ["opportunities", "projectId"],
+      ["opportunitygrants", "projectId,type"],
+      ["opportunitygrants", "opportunityId,type"],
+      ["opportunitygrants", "userId,requestId"],
+      ["wallettransactions", "settlementReference"],
+    ]) {
+      assert.ok(restoredIndexes.some(index => index.collection === collection && Object.keys(index.keys).join(",") === fields),
+        `Missing restored ${collection} index on ${fields}`);
+    }
+    for (const name of collections) assert.equal(await to.collection(name).countDocuments(), await from.collection(name).countDocuments());
+    t.diagnostic(`Native archive restored to an empty namespace. Verified ${restoredIndexes.length} marketplace unique indexes including settlementReference before API startup.`);
+  } else {
+    for (const name of collections) {
+      const docs = await from.collection(name).find().toArray();
+      assert.ok(docs.length);
+      const file = path.join(dir, name + ".bson");
+      await writeFile(file, BSON.serialize({ docs }));
+      await to.collection(name).insertMany(BSON.deserialize(await readFile(file)).docs);
+    }
   }
   const restored = await launch(uri + "/" + restoredName, secret, t);
   const retry = await restored.call("POST", "/" + listing + "/buy", token(buyer), purchase);
