@@ -50,6 +50,7 @@ function listingView(item, { admin = false, handoff = false, project, role, sett
   };
   if (admin) {
     result.rightsConfirmed = item.rightsConfirmed;
+    result.closedForRefundReviewAt = item.closedForRefundReviewAt || null;
     result.firstPublishedAt = (canonical ? item.projectPublishedAt : item.firstPublishedAt) || null;
     result.canConvert = !canonical && !settled && !item.rentedUntil && !item.soldAt;
     if (handoff) result.deliverable = item.deliverable || "";
@@ -414,6 +415,7 @@ async function refund(req, res) {
     grant.set({ refundedAt: new Date(), refundedBy: req.user.id, refundReason: reason.trim(), refundTransactionId: credit._id });
     await grant.save({ session });
     offer.status = "archived";
+    offer.closedForRefundReviewAt = grant.refundedAt;
     if (grant.type === "rent" && offer.rentedUntil?.getTime() === grant.endsAt?.getTime()) offer.rentedUntil = null;
     await saveRevision(offer, session);
     return grant;

@@ -32,6 +32,14 @@ Pop-Location
 npm run preview:marketplace -- --demo --production
 ```
 
+## Edit the Lumiere Life Science sample
+
+The local `--demo` option also creates a draft named **Lumiere Life Science**. It includes a fictional seed-germination brief, two required deliverables, a private handoff, a seven-day rental at USD 15 and Full Access at USD 60. Running the demo again preserves manual edits. Its rights confirmation starts unchecked.
+
+Open **Admin → Project offers**, choose Lumiere, then edit the public brief, category, access options, prices, rental duration and private handoff. **Open linked project** opens the project instructions and deliverables. **Edit specialization** opens the role and qualification settings. Save each form where you changed it. To publish real inventory, review the handoff, confirm the terms with the rights holder and publish the offer.
+
+For a reviewed refund, open **Project offers → Access receipts**, choose the receipt and record the reason. Confirmation credits the member's wallet once, preserves the original debit and receipt, revokes the grant and archives the listing for review. Confirm both the wallet entry and the listing status after issuing a refund.
+
 ## Start a fresh local replica
 
 These commands are for a fresh development database. In PowerShell, with MongoDB Server installed, run:

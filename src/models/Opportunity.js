@@ -24,6 +24,7 @@ const schema = new Schema({
   projectPublishedAt: Date,
   preserveRoleUntilPublished: { type: Boolean, default: false, select: false },
   soldAt: { type: Date, default: null },
+  closedForRefundReviewAt: Date,
   rentedUntil: { type: Date, default: null },
   applicationCount: { type: Number, default: 0 },
 }, { timestamps: true });
