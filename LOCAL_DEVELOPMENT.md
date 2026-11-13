@@ -13,12 +13,12 @@ npm run preview:marketplace -- --demo
 To reopen the November admin review at the same address, use the following in the backend checkout with the local replica running:
 
 ```powershell
-$env:UREMO_PREVIEW_SITE_PORT = "3147"
+$env:UREMO_PREVIEW_SITE_PORT = "3157"
 $env:UREMO_PREVIEW_API_PORT = "5147"
 node scripts/local-marketplace.js --demo
 ```
 
-Open [the local admin dashboard](http://localhost:3147/admin) and sign in using the local preview account. The default ports are still 3137 and 5137. If serving an optimized build, set `NEXT_PUBLIC_API_URL` to the selected API URL when building the frontend.
+Open [the local admin dashboard](http://localhost:3157/admin) and sign in using the local preview account. The default ports are 3137 and 5137. If serving an optimized build, set `NEXT_PUBLIC_API_URL` to the selected API URL when building the frontend.
 
 The marketplace has three entrances: [Open Roles](http://localhost:3137/open-roles), [Rent Projects](http://localhost:3137/projects/rent) and [Full Access](http://localhost:3137/projects/full-access). The [admin project offer editor](http://localhost:3137/admin/opportunities) sets the available terms for each identified project. The API listens on port 5137. The demo creates synthetic accounts, three specialized example projects, and a sample worker qualified in accessibility testing. It prints passwords for new synthetic accounts once. Sign in again after restarting the API. Use an HTTPS sample resume link to test role applications without an upload provider.
 
@@ -34,7 +34,7 @@ npm run preview:marketplace -- --demo --production
 
 ## Edit the Lumiere Life Science sample
 
-The local `--demo` option also creates a draft named **Lumiere Life Science**. It includes a fictional seed-germination brief, two required deliverables, a private handoff, a seven-day rental at USD 15 and Full Access at USD 60. Running the demo again preserves manual edits. Its rights confirmation starts unchecked.
+The local `--demo` option also creates a draft named **Lumiere Life Science**. It includes a fictional seed-germination brief, two required deliverables, a private handoff, a seven-day rental at USD 15 and Full Access at USD 60. Running the demo again preserves manual edits. Its rights confirmation starts unchecked. [Open the draft in the November local preview](http://localhost:3157/admin/opportunities?edit=6af72a53dc662aac800b4e2d).
 
 Open **Admin → Project offers**, choose Lumiere, then edit the public brief, category, access options, prices, rental duration and private handoff. **Open linked project** opens the project instructions and deliverables. **Edit specialization** opens the role and qualification settings. Save each form where you changed it. To publish real inventory, review the handoff, confirm the terms with the rights holder and publish the offer.
 
