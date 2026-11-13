@@ -10,6 +10,16 @@ With a local MongoDB replica named `uremoLocal` listening on `127.0.0.1:27347`, 
 npm run preview:marketplace -- --demo
 ```
 
+To reopen the November admin review at the same address, use the following in the backend checkout with the local replica running:
+
+```powershell
+$env:UREMO_PREVIEW_SITE_PORT = "3147"
+$env:UREMO_PREVIEW_API_PORT = "5147"
+node scripts/local-marketplace.js --demo
+```
+
+Open [the local admin dashboard](http://localhost:3147/admin) and sign in using the local preview account. The default ports are still 3137 and 5137. If serving an optimized build, set `NEXT_PUBLIC_API_URL` to the selected API URL when building the frontend.
+
 The marketplace has three entrances: [Open Roles](http://localhost:3137/open-roles), [Rent Projects](http://localhost:3137/projects/rent) and [Full Access](http://localhost:3137/projects/full-access). The [admin project offer editor](http://localhost:3137/admin/opportunities) sets the available terms for each identified project. The API listens on port 5137. The demo creates synthetic accounts, three specialized example projects, and a sample worker qualified in accessibility testing. It prints passwords for new synthetic accounts once. Sign in again after restarting the API. Use an HTTPS sample resume link to test role applications without an upload provider.
 
 For a full page audit, serve the optimized build. Stop the development preview first. Run these commands in PowerShell from the backend folder:

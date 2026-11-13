@@ -5,8 +5,18 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const mongoose = require("mongoose");
 
-const site = "http://localhost:3137";
-const api = "http://localhost:5137";
+function previewPort(name, fallback) {
+  const value = process.env[name] || String(fallback);
+  if (!/^\d{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 65535) {
+    throw new Error(`Invalid local preview port for ${name}`);
+  }
+  return Number(value);
+}
+const sitePort = previewPort("UREMO_PREVIEW_SITE_PORT", 3137);
+const apiPort = previewPort("UREMO_PREVIEW_API_PORT", 5137);
+if (sitePort === apiPort) throw new Error("The local site and API require separate ports.");
+const site = `http://localhost:${sitePort}`;
+const api = `http://localhost:${apiPort}`;
 const database = "mongodb://127.0.0.1:27347/uremo_market_preview?replicaSet=uremoLocal";
 const frontend = path.resolve(__dirname, "../../frontend");
 
@@ -21,12 +31,12 @@ async function run() {
   process.env.JWT_SECRET = randomBytes(48).toString("hex");
   process.env.MONGO_URI = database;
   process.env.FRONTEND_URL = site;
-  process.env.CORS_ALLOWED_ORIGINS = "http://127.0.0.1:3137";
+  process.env.CORS_ALLOWED_ORIGINS = `http://127.0.0.1:${sitePort}`;
   await mongoose.connect(database, { serverSelectionTimeoutMS: 4000 });
 
   const server = http.createServer(require("../src/app"));
   require("../src/socket").initSocket(server);
-  await new Promise((resolve, reject) => server.once("error", reject).listen(5137, "127.0.0.1", resolve));
+  await new Promise((resolve, reject) => server.once("error", reject).listen(apiPort, "127.0.0.1", resolve));
   try {
     if (process.argv.includes("--demo")) await prepareDemo();
   } catch (err) {
@@ -34,7 +44,7 @@ async function run() {
     throw err;
   }
   const mode = process.argv.includes("--production") ? ["start"] : ["dev", "--webpack"];
-  const client = spawn(process.execPath, [next, ...mode, "--hostname", "127.0.0.1", "--port", "3137"], {
+  const client = spawn(process.execPath, [next, ...mode, "--hostname", "127.0.0.1", "--port", String(sitePort)], {
     cwd: frontend, stdio: "inherit", windowsHide: true,
     env: { ...process.env, NEXT_PUBLIC_API_URL: api, JARVISX_BACKEND_URL: api, NEXT_TELEMETRY_DISABLED: "1" },
   });
