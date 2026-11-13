@@ -833,6 +833,13 @@ exports.adminVerifyTopup = async (req, res) => {
       const previousStatus = transaction.status;
       let updatedUser;
       if (action === "approve") {
+        if (transaction.provider === "manual" || transaction.provider === "internal") {
+          const reference = typeof req.body.settlementReference === "string" ? req.body.settlementReference.trim().toUpperCase() : "";
+          if (!/^[A-Z0-9][A-Z0-9._/-]{3,79}$/.test(reference)) {
+            fail(400, "Enter the unique reference from the verified payment record (4–80 letters, digits, dots, slashes, underscores or hyphens).");
+          }
+          transaction.set({ settlementReference: reference, settlementVerifiedBy: req.user.id });
+        }
         updatedUser = await changeFunds(user._id, transaction.amount, "credit", session);
         transaction.set({ status: "success", description: "Wallet top-up (verified)",
           balanceBefore: updatedUser.balanceBefore, balanceAfter: updatedUser.walletBalance });
@@ -950,6 +957,9 @@ exports.adminVerifyTopup = async (req, res) => {
       });
     }
   } catch (err) {
+    if (err.code === 11000 && err.keyPattern?.settlementReference) {
+      return res.status(409).json({ error: "This payment reference has already funded a wallet." });
+    }
     if (err.status) return res.status(err.status).json({ error: err.message, ...err.fields });
     console.error("adminVerifyTopup error:", err);
     res.status(500).json({ error: "Failed to verify topup" });
@@ -974,6 +984,7 @@ exports.adminGetUserWallet = async (req, res) => {
 
     const [transactions, total] = await Promise.all([
       WalletTransaction.find({ user: userId })
+        .select("+settlementReference +settlementVerifiedBy")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)

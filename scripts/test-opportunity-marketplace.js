@@ -383,8 +383,16 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
 
   await t.test("public briefs, qualified specialization rental, independent full access, snapshots and expiry", async () => {
     const role = await makeRole(), one = new mongoose.Types.ObjectId(), two = new mongoose.Types.ObjectId();
+    const Screening = require("../src/models/Screening");
+    await Screening.collection.insertMany([one, two].map(_id => ({ _id, title: "Required test", category: "writing", active: true })));
     await Role.updateOne({ _id: role._id }, { hasScreening: true, screeningId: one });
     const project = await makeProject(role, { screeningIds: [two] });
+    const publish = () => req(adminApi, admin, "POST", { ...offer, projectId: project._id });
+    assert.match((await publish()).message, /link every required project screening/i);
+    await Role.updateOne({ _id: role._id }, { screeningIds: [one, two] });
+    await Screening.updateOne({ _id: two }, { active: false });
+    assert.match((await publish()).message, /unavailable screenings/i);
+    await Screening.updateOne({ _id: two }, { active: true });
     const item = await create({ projectId: project._id });
     assert.deepEqual([item.kind, item.needsReview, item.projectId, item.workPositionId, item.applyEnabled],
       ["project", false, String(project._id), String(role._id), false]);
@@ -616,7 +624,9 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await withdraw(member, 10)).status, 400);
     const topup = await req("/wallet/topup", member, "POST", { amount: 25 });
     assert.equal(topup.status, 200);
-    const approve = () => req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: topup.transactionId });
+    const settlementReference = "QA-" + randomUUID();
+    const approve = () => req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: topup.transactionId, settlementReference });
+    assert.equal((await req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: topup.transactionId })).status, 400);
     const failure = t.mock.method(Wallet.prototype, "save", async () => { throw Error("Simulated top-up ledger failure"); });
     assert.equal((await approve()).status, 500);
     failure.mock.restore();
@@ -627,5 +637,30 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal(final.spendable, 25);
     assert.equal(final.withdrawable, 0);
     assert.equal((await withdraw(member, 10)).status, 400);
+    const duplicate = await req("/wallet/topup", member, "POST", { amount: 10 });
+    const reused = await req("/admin/wallet/verify-topup", admin, "POST", { action: "approve", transactionId: duplicate.transactionId, settlementReference: settlementReference.toLowerCase() });
+    assert.equal(reused.status, 409);
+    assert.equal((await Wallet.findById(duplicate.transactionId)).status, "initiated");
+    const verified = await Wallet.findById(topup.transactionId).select("+settlementReference +settlementVerifiedBy");
+    assert.equal(verified.settlementReference, settlementReference.toUpperCase());
+    assert.equal(String(verified.settlementVerifiedBy), String(admin._id));
+    const memberHistory = await req("/wallet/transactions", member);
+    const adminHistory = await req("/admin/wallet/user/" + member._id, admin);
+    assert.equal(memberHistory.transactions.find(row => row._id === topup.transactionId).settlementReference, undefined);
+    assert.equal(adminHistory.transactions.find(row => row._id === topup.transactionId).settlementReference, settlementReference.toUpperCase());
+    const item = await create({});
+    const request = terms("buy");
+    const purchase = await charge(item, member, "buy", request);
+    assert.equal(purchase.status, 201);
+    assert.equal(purchase.grant.amount, 25);
+    assert.equal((await charge(item, member, "buy", request)).replayed, true);
+    assert.equal((await access(item, member)).status, 200);
+    assert.equal((await charge(item, other, "buy")).status, 409);
+    const entries = await Wallet.find({ user: member._id, status: "success" }).sort({ createdAt: 1 }).lean();
+    assert.deepEqual(entries.map(row => [row.type, row.amount, row.balanceBefore, row.balanceAfter]),
+      [["credit", 25, 0, 25], ["debit", 25, 25, 0]]);
+    assert.equal(String(entries[0]._id), topup.transactionId);
+    assert.equal(String(entries[1].referenceId), purchase.grant._id);
+    assert.equal(await readBalance(member), 0);
   });
 });

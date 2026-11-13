@@ -5,6 +5,7 @@ const { changeFunds } = require("../services/walletFunds");
 const WalletTransaction = require("../models/WalletTransaction");
 const WorkPosition = require("../models/WorkPosition");
 const Project = require("../models/Project");
+const Screening = require("../models/Screening");
 const ApplyWork = require("../models/ApplyWork");
 const { specializationRoles } = require("../services/roleCatalog");
 const { meetsScreenings } = require("../services/roleProjects");
@@ -143,7 +144,7 @@ async function saveListing(req, res) {
       // A real write serializes publication with concurrent project edits/deletions
       // and competing offers, including before the project uniqueness index exists.
       const project = await Project.findOneAndUpdate({ _id: projectId, ...staffingFilter },
-        { $inc: { paidOfferRevision: 1 } }, { session, timestamps: false }).select("workPositionId");
+        { $inc: { paidOfferRevision: 1 } }, { session, timestamps: false }).select("workPositionId screeningId screeningIds");
       if (!project?.workPositionId) throw error(400, "Choose an unassigned draft or open project with a work specialization");
       if (patch.workPositionId && String(patch.workPositionId) !== String(project.workPositionId)) {
         throw error(400, "The specialization must match the chosen project");
@@ -165,6 +166,7 @@ async function saveListing(req, res) {
         }
         if (!item.rentEnabled && !item.buyEnabled) throw error(400, "Enable rent, full access, or both");
         if (item.rentEnabled && (item.rentPrice <= 0 || item.rentalDays < 1)) throw error(400, "A rental needs a positive price and a term of 1–365 days");
+        if (item.rentEnabled) await checkRentalScreenings(role, project, session);
         if (item.buyEnabled && item.buyPrice <= 0) throw error(400, "Full access needs a positive price");
         if (!item.deliverable) throw error(400, "A paid opportunity requires a private deliverable");
         item.firstPublishedAt ||= new Date();
@@ -186,6 +188,19 @@ const publishedOffer = { status: "published", rightsConfirmed: true, applyEnable
   projectId: { $type: "objectId" }, projectRoleId: { $type: "objectId" }, projectPublishedAt: { $type: "date" } };
 const contextFields = "title workPositionId status screeningId screeningIds";
 const roleFields = "title category serviceId active hasScreening screeningId screeningIds";
+
+async function checkRentalScreenings(role, project, session) {
+  if (!role.active) throw error(400, "Activate the project's specialization before publishing a rental.");
+  const roleIds = new Set([role.screeningId, ...(role.screeningIds || [])].filter(Boolean).map(String));
+  const projectIds = [project.screeningId, ...(project.screeningIds || [])].filter(Boolean).map(String);
+  if ((role.hasScreening && !roleIds.size) || projectIds.some(id => !role.hasScreening || !roleIds.has(id))) {
+    throw error(400, "Link every required project screening to the specialization before publishing a rental.");
+  }
+  if (role.hasScreening && roleIds.size) {
+    const active = await Screening.countDocuments({ _id: { $in: [...roleIds] }, active: true }).session(session);
+    if (active !== roleIds.size) throw error(400, "Activate or replace unavailable screenings in the specialization before publishing a rental.");
+  }
+}
 
 function validTerms(item) {
   return item.currency === "USD" && (item.buyEnabled || item.rentEnabled) &&
