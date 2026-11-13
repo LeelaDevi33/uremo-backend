@@ -89,6 +89,5 @@ const workPositionSchema = new mongoose.Schema(
 );
 
 workPositionSchema.index({ active: 1, sortOrder: 1, createdAt: -1 });
-workPositionSchema.index({ serviceId: 1 });
 
 module.exports = mongoose.model("WorkPosition", workPositionSchema);
