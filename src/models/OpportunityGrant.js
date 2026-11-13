@@ -17,6 +17,10 @@ const schema = new Schema({
   endsAt: { type: Date, default: null },
   rentalDays: { type: Number, default: null },
   balanceAfter: { type: Number, required: true },
+  refundedAt: Date,
+  refundReason: { type: String, maxlength: 500, select: false },
+  refundedBy: { type: Schema.Types.ObjectId, ref: "User", select: false },
+  refundTransactionId: { type: Schema.Types.ObjectId, ref: "WalletTransaction" },
 }, { timestamps: true });
 
 schema.index({ userId: 1, requestId: 1 }, { unique: true });

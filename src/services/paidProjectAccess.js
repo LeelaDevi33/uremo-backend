@@ -14,7 +14,7 @@ async function paidProjectAccess(userId, projectIds, { session } = {}) {
   if (!offers.length || !userId) return states;
   const now = new Date();
   const grants = await Grant.find({
-    userId, projectId: { $in: ids }, opportunityId: { $in: offers.map(item => item._id) }, startsAt: { $lte: now },
+    userId, refundedAt: null, projectId: { $in: ids }, opportunityId: { $in: offers.map(item => item._id) }, startsAt: { $lte: now },
   }).select("projectId opportunityId type endsAt").sort({ startsAt: -1 }).session(session || null).lean();
   for (const grant of grants) {
     const access = states.get(String(grant.projectId));

@@ -58,7 +58,7 @@ router.get("/marketplace-revenue", auth, admin, async (_req, res, next) => {
   try {
     const OpportunityGrant = require("../models/OpportunityGrant");
     const rows = await OpportunityGrant.aggregate([
-      { $match: { type: { $in: ["rent", "buy"] }, currency: "USD" } },
+      { $match: { type: { $in: ["rent", "buy"] }, currency: "USD", refundedAt: null } },
       { $group: {
         _id: "$type",
         count: { $sum: 1 },

@@ -23,8 +23,8 @@ exports.overview = async (_req, res, next) => {
     ] = await Promise.all([
       require("./opportunity.controller").publicOfferFacts().then(facts => facts.count),
       Opportunity.countDocuments({ status: "draft" }),
-      Grant.countDocuments({ type: "rent", endsAt: { $gt: now } }),
-      Grant.countDocuments({ type: "buy" }),
+      Grant.countDocuments({ type: "rent", refundedAt: null, endsAt: { $gt: now } }),
+      Grant.countDocuments({ type: "buy", refundedAt: null }),
       Order.countDocuments({ status: "pending" }),
       Order.countDocuments({ status: "in_progress", updatedAt: { $lt: new Date(now.getTime() - 48 * 3600000) } }),
       Ticket.countDocuments({ status: "open" }),
@@ -57,11 +57,11 @@ exports.receipts = async (req, res, next) => {
     if (type) filter.type = type;
     if (before) filter._id = { $lt: before };
     const rows = await Grant.find(filter)
-      .select("title userId type amount currency startsAt endsAt")
+      .select("title userId type amount currency startsAt endsAt refundedAt refundTransactionId +refundReason +refundedBy")
       .populate("userId", "name")
       .sort({ _id: -1 }).limit(26).lean();
-    const receipts = rows.slice(0, 25).map(({ _id, title, userId, type, amount, currency, startsAt, endsAt }) =>
-      ({ _id, title, holder: userId?.name || "Archived account", type, amount, currency, startsAt, endsAt }));
+    const receipts = rows.slice(0, 25).map(({ userId, ...receipt }) =>
+      ({ ...receipt, holder: userId?.name || "Archived account" }));
     res.set("Cache-Control", "private, no-store").json({
       receipts, nextCursor: rows.length > 25 ? receipts[24]._id : null,
     });

@@ -62,7 +62,8 @@ function grantView(grant, now = new Date()) {
     projectScope: grant.projectScope || "",
     projectId: grant.projectId || null, workPositionId: grant.workPositionId || null,
     amount: grant.amount, currency: grant.currency, startsAt: grant.startsAt, endsAt: grant.endsAt,
-    active: grant.startsAt <= now && (grant.type === "buy" && grant.endsAt == null || grant.type === "rent" && grant.endsAt > now),
+    refundedAt: grant.refundedAt || null,
+    active: !grant.refundedAt && grant.startsAt <= now && (grant.type === "buy" && grant.endsAt == null || grant.type === "rent" && grant.endsAt > now),
   };
 }
 
@@ -218,7 +219,7 @@ function applicationFilter(userId, roleIds) {
 // The immutable grant is a second inventory check if an imported listing's
 // mutable sold/rental markers were lost. Buy receipts reserve the project permanently.
 function heldInventory(projectIds, now) {
-  return Grant.find({ projectId: { $in: projectIds }, $or: [
+  return Grant.find({ projectId: { $in: projectIds }, refundedAt: null, $or: [
     { type: "buy" }, { type: "rent", endsAt: { $gt: now } }, { type: "rent", endsAt: null },
   ] }).select("projectId type");
 }
@@ -383,11 +384,41 @@ async function access(req, res) {
   validId(req.params.id);
   const now = new Date();
   const grant = await Grant.findOne({
-    userId: req.user.id, opportunityId: req.params.id, startsAt: { $lte: now },
+    userId: req.user.id, opportunityId: req.params.id, refundedAt: null, startsAt: { $lte: now },
     $or: [{ type: "buy", endsAt: null }, { type: "rent", endsAt: { $gt: now } }],
   }).select("+deliverable").sort({ startsAt: -1 }).lean();
   if (!grant) throw error(403, "An active rental or purchase is required");
   res.json({ ok: true, grant: grantView(grant, now), deliverable: grant.deliverable });
 }
 
-module.exports = { publicOfferFacts, saveListing, publicListings, publicDetail, adminListings, adminDetail, checkout, mine, access };
+async function refund(req, res) {
+  const { id } = req.params;
+  validId(id);
+  const reason = req.body?.reason;
+  if (typeof reason !== "string" || reason.trim().length < 3 || reason.trim().length > 500) throw error(400, "Enter a review reason of 3–500 characters.");
+  const receipt = await Grant.db.transaction(async session => {
+    const grant = await Grant.findById(id).session(session);
+    if (!grant) throw error(404, "Receipt not found.");
+    if (grant.refundedAt) return grant;
+    const debits = await WalletTransaction.find({ referenceId: grant._id, user: grant.userId, type: "debit",
+      source: grant.type === "rent" ? "rental_purchase" : "service_purchase", status: "success" }).limit(2).session(session);
+    if (debits.length !== 1 || debits[0].amount !== grant.amount || grant.currency !== "USD") throw error(409, "The original wallet debit needs reconciliation before a refund.");
+    const priorRefund = await WalletTransaction.exists({ referenceId: grant._id, source: "refund", status: "success" }).session(session);
+    if (priorRefund) throw error(409, "A prior refund requires reconciliation.");
+    const offer = await Opportunity.findById(grant.opportunityId).session(session);
+    if (!offer) throw error(409, "Restore the original listing before refunding this receipt.");
+    const funds = await changeFunds(grant.userId, grant.amount, "credit", session);
+    const [credit] = await WalletTransaction.create([{ user: grant.userId, type: "credit", source: "refund", status: "success",
+      provider: "internal", referenceId: grant._id, amount: grant.amount,
+      balanceBefore: funds.balanceBefore, balanceAfter: funds.walletBalance, description: "Project access refund: " + grant.title }], { session, ordered: true });
+    grant.set({ refundedAt: new Date(), refundedBy: req.user.id, refundReason: reason.trim(), refundTransactionId: credit._id });
+    await grant.save({ session });
+    offer.status = "archived";
+    if (grant.type === "rent" && offer.rentedUntil?.getTime() === grant.endsAt?.getTime()) offer.rentedUntil = null;
+    await saveRevision(offer, session);
+    return grant;
+  });
+  res.json({ ok: true, grant: grantView(receipt), refundTransactionId: receipt.refundTransactionId });
+}
+
+module.exports = { publicOfferFacts, saveListing, publicListings, publicDetail, adminListings, adminDetail, checkout, mine, access, refund };

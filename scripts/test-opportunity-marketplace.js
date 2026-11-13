@@ -67,6 +67,37 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
   const charge = (item, user, mode, body = terms(mode)) => req(api + "/" + item._id + "/" + mode, user, "POST", body);
   const access = (item, user) => req(api + "/" + item._id + "/access", user);
 
+  await t.test("reviewed rent and sale refunds repay exactly once, revoke all access and leave the offer closed", async () => {
+    const { acquiredProjects } = require("../src/services/profileProjects");
+    for (const [type, member] of [["rent", renter], ["buy", buyer]]) {
+      const item = await create({});
+      const balance = await readBalance(member);
+      const request = terms(type);
+      const chargeResult = await charge(item, member, type, request);
+      assert.equal(chargeResult.status, 201);
+      const id = chargeResult.grant._id, path = adminApi + "/receipts/" + id + "/refund";
+      const review = { reason: "Confirmed delivery issue" };
+      assert.equal((await req(path, member, "POST", review)).status, 403);
+      assert.equal((await req(path, admin, "POST", { reason: "" })).status, 400);
+      const refunds = await Promise.all([req(path, admin, "POST", review), req(path, admin, "POST", review)]);
+      assert.deepEqual(refunds.map(r => r.status), [200, 200]);
+      assert.equal(refunds[0].refundTransactionId, refunds[1].refundTransactionId);
+      assert.equal(await readBalance(member), balance);
+      assert.equal(await Wallet.countDocuments({ referenceId: id, source: "refund" }), 1);
+      assert.equal(await Wallet.countDocuments({ referenceId: id, type: "debit" }), 1);
+      assert.equal((await Opportunity.findById(item._id)).status, "archived");
+      assert.equal((await access(item, member)).status, 403);
+      assert.equal((await req(api + "/" + item._id, member)).status, 404);
+      assert.equal((await acquiredProjects(member._id, item.projectId)).length, 0);
+      assert.equal((await (paidProjectAccess(member._id, [item.projectId]))).get(item.projectId).active, false);
+      assert.equal((await charge(item, member, type, request)).grant.active, false);
+      const receipt = (await req(api + "/mine", member)).grants.find(r => r._id === id);
+      assert.ok(receipt.refundedAt); assert.equal(receipt.refundReason, undefined);
+      const recorded = await Grant.findById(id).select("+refundedBy +refundReason");
+      assert.equal(recorded.refundReason, review.reason); assert.equal(String(recorded.refundedBy), String(admin._id));
+    }
+  });
+
   await t.test("every historical and current listing revision guards its full editor and status actions", async () => {
     const item = await create({});
     const path = adminApi + "/" + item._id;

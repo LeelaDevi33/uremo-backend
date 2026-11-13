@@ -7,7 +7,7 @@ const { paidProjectAccess } = require("./paidProjectAccess");
 async function acquiredProjects(userId, projectId) {
   const now = new Date();
   const query = Grant.find({
-    userId, projectId: projectId || { $type: "objectId" }, startsAt: { $lte: now },
+    userId, refundedAt: null, projectId: projectId || { $type: "objectId" }, startsAt: { $lte: now },
     $or: [{ type: "buy", endsAt: null }, { type: "rent", endsAt: { $gt: now } }],
   }).select("projectId opportunityId title projectScope type endsAt startsAt" + (projectId ? " +deliverable" : ""))
     .sort({ startsAt: -1 }).lean();
