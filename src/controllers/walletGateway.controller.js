@@ -36,21 +36,28 @@ exports.create = handler(async req => {
   const token = await paypal.authorize();
   const tx = await WalletTransaction.create({ user: user._id, type: "credit", source: "topup", amount, status: "initiated",
     provider: "paypal", gatewayMode: paypal.status().mode, description: "Wallet top-up via PayPal", balanceBefore: user.walletBalance || 0 });
-  const frontend = new URL("/wallet", process.env.FRONTEND_URL || "https://uremo.online").href;
-  const order = await paypal.create(token, { intent: "CAPTURE", purchase_units: [{ custom_id: String(tx._id),
-    payee: { merchant_id: process.env.PAYPAL_MERCHANT_ID }, amount: { currency_code: "USD", value: amount.toFixed(2) } }],
-    payment_source: { paypal: { experience_context: { user_action: "PAY_NOW", return_url: frontend + "?paypal=success",
-      cancel_url: frontend + "?paypal=cancelled" } } } }, "create-" + tx._id);
-  const link = order.links?.find(link => ["payer-action", "approve"].includes(link.rel) && paypal.validApprovalURL(link.href));
-  if (!validId(order.id) || !link) throw error(502, "PayPal did not return a valid checkout link.");
-  await WalletTransaction.updateOne({ _id: tx._id }, { $set: { providerRef: order.id } });
-  return { success: true, transactionId: tx._id, paypalOrderId: order.id, approvalUrl: link.href, status: "initiated", amount };
+  try {
+    const frontend = new URL("/wallet", process.env.FRONTEND_URL || "https://uremo.online").href;
+    const order = await paypal.create(token, { intent: "CAPTURE", purchase_units: [{ custom_id: String(tx._id),
+      payee: { merchant_id: process.env.PAYPAL_MERCHANT_ID }, amount: { currency_code: "USD", value: amount.toFixed(2) } }],
+      payment_source: { paypal: { experience_context: { user_action: "PAY_NOW", return_url: frontend + "?paypal=success",
+        cancel_url: frontend + "?paypal=cancelled" } } } }, "create-" + tx._id);
+    const link = order.links?.find(link => ["payer-action", "approve"].includes(link.rel) && paypal.validApprovalURL(link.href));
+    if (!validId(order.id) || !link) throw error(502, "PayPal did not return a valid checkout link.");
+    await WalletTransaction.updateOne({ _id: tx._id }, { $set: { providerRef: order.id } });
+    return { success: true, transactionId: tx._id, paypalOrderId: order.id, approvalUrl: link.href, status: "initiated", amount };
+  } catch (err) {
+    // No approval URL reached the caller. A later verified capture can still settle this row.
+    await WalletTransaction.updateOne({ _id: tx._id, status: "initiated", providerRef: null },
+      { $set: { status: "failed", failureReason: "PayPal checkout could not be opened." } });
+    throw err;
+  }
 });
 
 function validateOrder(order, tx, orderId) {
   const unit = order.purchase_units?.[0];
   if (order.id !== orderId || order.intent !== "CAPTURE" || order.purchase_units?.length !== 1 ||
-      unit.payee?.merchant_id !== process.env.PAYPAL_MERCHANT_ID ||
+      unit?.payee?.merchant_id !== process.env.PAYPAL_MERCHANT_ID ||
       (tx.gatewayMode && (tx.gatewayMode !== paypal.status().mode || unit.custom_id !== String(tx._id))) ||
       (unit.custom_id && unit.custom_id !== String(tx._id)) || !matchesAmount(unit.amount, tx.amount)) {
     throw error(409, "PayPal order details do not match the wallet request.");

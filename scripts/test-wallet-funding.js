@@ -120,6 +120,47 @@ test("wallet funding methods and provider-confirmed settlement on mounted routes
     assert.equal(receipts[0].balanceBefore, 12.34);
     assert.equal(receipts[0].balanceAfter, 37.34);
   });
+
+  await t.test("previously captured PayPal orders resume from the owner's history with funding paused", async t => {
+    const orderId = "TESTLEGACYORDER", captureId = "TESTLEGACYCAPTURE";
+    await Wallet.create({ user: other._id, provider: "paypal", providerRef: orderId,
+      amount: 8.25, type: "credit", source: "topup", status: "paid_unverified" });
+    await assert.rejects(Wallet.create({ user: worker._id, provider: "paypal", providerRef: orderId,
+      amount: 8.25, type: "credit", source: "topup", status: "initiated" }), err => err.code === 11000);
+    const tx = (await request("/wallet/transactions", other)).body.transactions.find(tx => tx.providerRef === orderId);
+    assert.equal(tx.status, "paid_unverified");
+    const money = { currency_code: "USD", value: "8.25" };
+    t.mock.method(paypal, "authorize", async () => "fixture");
+    t.mock.method(paypal, "read", async () => ({ id: orderId, intent: "CAPTURE", status: "COMPLETED",
+      purchase_units: [{ payee: { merchant_id: "TESTMERCHANT" }, amount: money,
+        payments: { captures: [{ id: captureId, status: "COMPLETED", amount: money }] } }] }));
+    const confirm = user => request(gateway + "/confirm", user, "POST", { paypalOrderId: tx.providerRef });
+    assert.equal((await confirm(worker)).status, 404);
+    assert.equal((await confirm(other)).status, 200);
+    assert.equal((await confirm(other)).body.alreadyProcessed, true);
+    assert.equal(await balance(other), 8.25);
+  });
+
+  await t.test("provider creation failure ends the local request without changing funds", async t => {
+    const { updatedAt } = (await request(methods, admin)).body.paypal;
+    assert.equal((await setGateway(admin, true, updatedAt)).status, 200);
+    t.mock.method(paypal, "authorize", async () => "fixture");
+    t.mock.method(paypal, "create", async () => { throw new Error("Provider unavailable"); });
+    const result = await request(gateway + "/create", other, "POST", { amount: 11 });
+    assert.equal(result.status, 503);
+    assert.equal((await Wallet.findOne({ user: other._id, provider: "paypal", amount: 11 })).status, "failed");
+    assert.equal(await balance(other), 8.25);
+  });
+});
+
+test("the server fails startup before connecting when the JWT secret is missing", async () => {
+  const env = { ...process.env, JWT_SECRET: "", MONGO_URI: "", PORT: "0" };
+  await assert.rejects(promisify(execFile)(process.execPath, [path.resolve(__dirname, "../src/server.js")], { env, timeout: 15000 }), err => {
+    assert.equal(err.code, 1);
+    assert.match(err.stderr, /JWT_SECRET is required/);
+    assert.doesNotMatch(err.stdout, /UREMO backend running on port/);
+    return true;
+  });
 });
 
 test("server preserves conflicting historical manual requests and refuses to open checkout without its indexes", { skip: !process.env.UREMO_TEST_MONGO_PORT }, async t => {

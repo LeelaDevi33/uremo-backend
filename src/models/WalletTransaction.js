@@ -140,6 +140,10 @@ walletTransactionSchema.index({ status: 1, createdAt: -1 });
 
 // PATCH_80: Index for provider reference lookups (webhook processing)
 walletTransactionSchema.index({ provider: 1, providerRef: 1 });
+// Legacy PayPal orders have no wallet transaction ID in their purchase unit.
+// Their stored provider order ID must identify exactly one top-up, even after a retry.
+walletTransactionSchema.index({ providerRef: 1 }, { unique: true,
+  partialFilterExpression: { provider: "paypal", source: "topup", providerRef: { $type: "string" } } });
 walletTransactionSchema.index({ user: 1, methodId: 1, paymentReference: 1 }, {
   unique: true, partialFilterExpression: { provider: "manual", paymentReference: { $type: "string" }, status: { $in: ["initiated", "pending"] } },
 });

@@ -20,7 +20,7 @@ const mongoose = require("mongoose");
 (async () => {
   await mongoose.connect(process.env.UREMO_FIXTURE_URI);
   const app = require("./src/app");
-  await Promise.all(["User", "Opportunity", "OpportunityGrant", "WalletTransaction"].map(name => mongoose.model(name).init()));
+  await require("./src/services/marketplaceIndexes").initializeMarketplaceIndexes(mongoose.connection.db);
   const server = app.listen(0, "127.0.0.1", () => process.send(server.address().port));
   process.on("message", () => server.close(async () => { await mongoose.disconnect(); process.exit(0); }));
 })().catch(() => process.exit(1));`;
@@ -97,6 +97,9 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
       ["opportunitygrants", "opportunityId,type"],
       ["opportunitygrants", "userId,requestId"],
       ["wallettransactions", "settlementReference"],
+      ["wallettransactions", "providerRef"],
+      ["withdrawalrequests", "userId,requestId"],
+      ["users", "email"],
     ]) {
       assert.ok(restoredIndexes.some(index => index.collection === collection && Object.keys(index.keys).join(",") === fields),
         `Missing restored ${collection} index on ${fields}`);
