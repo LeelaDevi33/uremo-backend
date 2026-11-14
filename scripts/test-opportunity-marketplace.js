@@ -457,13 +457,15 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await access(item, applicant)).status, 403);
     const custom = await Role.create({ title: "Financial analyst", category: "Finance research" });
     const retired = await Role.create({ title: "Legacy catalog fixture", category: "forex_accounts" });
+    const historicalFixture = await Role.create({ title: "Test Data Entry Role", category: "qa",
+      description: "Test position for PATCH_44 multi-job validation" });
     const source = await Service.collection.insertOne({ title: "Retired", category: "banks_gateways_wallets", slug: randomUUID() });
     const backed = await Role.create({ title: "Misleading label", category: "design", serviceId: source.insertedId });
     const listed = Object.values(await req("/work-positions")).map(row => row?._id);
     const adminRoles = Object.values(await req("/admin/work-positions", admin)).filter(row => row?._id);
     assert.equal(adminRoles.find(row => row._id === String(custom._id)).isSpecialization, true);
     assert.ok(listed.includes(String(role._id)) && listed.includes(String(custom._id)));
-    for (const blocked of [backed, retired]) {
+    for (const blocked of [backed, retired, historicalFixture]) {
       assert.equal(adminRoles.find(row => row._id === String(blocked._id)).isSpecialization, false);
       assert.ok(!listed.includes(String(blocked._id)));
       assert.equal((await req("/workspace/apply/" + blocked._id, other, "POST", {})).status, 404);

@@ -1,3 +1,5 @@
+const { baseUrl, testCredentials } = require("./scripts/test-target");
+const { email: ADMIN_EMAIL, password: ADMIN_PASS } = testCredentials("ADMIN");
 /**
  * PATCH_26: Affiliate Dashboard Acceptance Tests
  * Tests the complete affiliate flow as specified:
@@ -8,11 +10,9 @@
  * 5) Admin sees User A in affiliates list
  */
 
-const axios = require("axios");
+const axios = require("axios").create({ maxRedirects: 0 });
 
-const BASE = "https://uremo-backend.onrender.com/api";
-const ADMIN_EMAIL = "sajalnew02@gmail.com";
-const ADMIN_PASS = "sajal@9547";
+const BASE = baseUrl + "/api";
 
 const results = [];
 let passed = 0;

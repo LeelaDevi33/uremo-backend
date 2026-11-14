@@ -1,8 +1,10 @@
+const { baseUrl, testFetch, testCredentials } = require("./test-target");
+const credentials = testCredentials("TEST");
 // JarvisX User Flow Test - Testing realistic user queries
-const BASE_URL = "https://uremo-backend.onrender.com";
+const BASE_URL = baseUrl;
 
 async function chat(token, message) {
-  const r = await fetch(BASE_URL + "/api/jarvisx/chat", {
+  const r = await testFetch(BASE_URL + "/api/jarvisx/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -17,12 +19,12 @@ async function testUserFlow() {
   // Login as regular user (not admin)
   console.log("=== JarvisX User Flow Test (PATCH_22) ===\n");
 
-  const l = await fetch(BASE_URL + "/api/auth/login", {
+  const l = await testFetch(BASE_URL + "/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: "sajalnew02@gmail.com",
-      password: "sajal@9547",
+      email: credentials.email,
+      password: credentials.password,
     }),
   });
   const d = await l.json();

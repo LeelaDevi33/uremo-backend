@@ -1,15 +1,15 @@
+const { baseUrl, testCredentials } = require("./scripts/test-target");
+const { email: ADMIN_EMAIL, password: ADMIN_PASS } = testCredentials("ADMIN");
 /**
  * PATCH_25 Complete Test Suite
  * Tests ALL platform functionality after audit fixes
  */
 
-const axios = require("axios");
+const axios = require("axios").create({ maxRedirects: 0 });
 const fs = require("fs");
 const path = require("path");
 
-const BASE = "https://uremo-backend.onrender.com/api";
-const ADMIN_EMAIL = "sajalnew02@gmail.com";
-const ADMIN_PASS = "sajal@9547";
+const BASE = baseUrl + "/api";
 
 const results = [];
 let passed = 0;

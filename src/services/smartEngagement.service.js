@@ -16,6 +16,9 @@ const Order = require("../models/Order");
 const Project = require("../models/Project");
 const Grant = require("../models/OpportunityGrant");
 const { meetsScreenings } = require("./roleProjects");
+const { roleFields } = require("./applicationScreenings");
+const { catalogFields, directoryExclusions, specializationRoles } = require("./roleCatalog");
+const WorkPosition = require("../models/WorkPosition");
 const { escapeHtml } = require("../emails/templates");
 const Notification = require("../models/Notification");
 const { sendEmail } = require("./email.service");
@@ -242,10 +245,11 @@ const processScreeningNudge = async () => {
 
   try {
     // Find applications where screening was unlocked > 24 hours ago
-    const pendingScreenings = await ApplyWork.find({
-      workerStatus: { $in: ["screening_unlocked", "training_viewed"] },
-      updatedAt: { $lte: cutoffTime },
-    })
+    const due = { workerStatus: { $in: ["screening_unlocked", "training_viewed"] }, updatedAt: { $lte: cutoffTime } };
+    const roleIds = await ApplyWork.distinct("position", due);
+    const roles = await WorkPosition.find({ _id: { $in: roleIds.filter(Boolean) } }).select(catalogFields).lean();
+    const eligible = await specializationRoles(roles);
+    const pendingScreenings = await ApplyWork.find({ ...due, $or: [{ position: null }, { position: { $in: eligible.map(r => r._id) } }] })
       .populate(
         "user",
         "name email emailPreferences engagementNudges lastEngagementEmail lastLogin",
@@ -309,8 +313,8 @@ const notifyReadyWorkers = async (_jobTitle, _jobCategory, jobId) => {
   try {
     if (!Project.base.isObjectIdOrHexString(jobId)) throw Object.assign(new Error("Select a project to notify workers"), { status: 400 });
     const project = await Project.findOne({ _id: jobId, status: "open", assignedTo: null })
-      .select("title category workPositionId screeningId screeningIds").populate("workPositionId", "active hasScreening screeningId screeningIds").lean();
-    if (!project?.workPositionId?.active) return { notified: 0, emailed: 0 };
+      .select("title category workPositionId screeningId screeningIds").populate("workPositionId", roleFields + " active").lean();
+    if (!project?.workPositionId?.active || (await directoryExclusions([project.workPositionId])).size) return { notified: 0, emailed: 0 };
     const jobTitle = project.title;
     const readyWorkers = await ApplyWork.find({
       position: project.workPositionId._id, status: "approved", workerStatus: "ready_to_work", currentProject: null,

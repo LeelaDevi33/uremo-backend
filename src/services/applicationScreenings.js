@@ -1,10 +1,11 @@
 const ApplyWork = require("../models/ApplyWork");
 const Screening = require("../models/Screening");
 const { roleError } = require("./adminWorkRoles");
+const { catalogFields, directoryExclusions } = require("./roleCatalog");
 
 const unlocked = ["screening_unlocked", "training_viewed", "screening_available"];
 const summaryFields = "title description timeLimit passingScore trainingMaterials active";
-const roleFields = "title category hasScreening screeningId screeningIds";
+const roleFields = catalogFields + " hasScreening screeningId screeningIds";
 
 function passedScreening(record) {
   return record.submissionStatus === "approved" ||
@@ -36,9 +37,10 @@ async function eligibleApplication(user, screeningId, positionId) {
     filter.$or = [{ _id: positionId }, { position: positionId }];
   }
   const profiles = await ApplyWork.find(filter).populate("position", roleFields);
+  const excluded = await directoryExclusions(profiles.map(profile => profile.position).filter(Boolean));
   const matches = [];
   for (const profile of profiles) {
-    if (!profile.position && profile.populated("position")) continue;
+    if (excluded.has(String(profile.position?._id)) || (!profile.position && profile.populated("position"))) continue;
     const ids = await requiredScreeningIds(profile.position, profile.category);
     const alreadyCompleted = profile.screeningsCompleted.some(record =>
       String(record.screeningId) === String(screeningId) && (passedScreening(record) || record.submissionStatus === "pending_review"));

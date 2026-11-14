@@ -1,7 +1,9 @@
+const { baseUrl, testFetch, testCredentials } = require("./test-target");
+const credentials = testCredentials("ADMIN");
 /**
  * Full Admin Flow Test for PATCH_21
  */
-const BASE_URL = "https://uremo-backend.onrender.com";
+const BASE_URL = baseUrl;
 
 async function test() {
   console.log("=".repeat(60));
@@ -12,12 +14,12 @@ async function test() {
   try {
     // 1. LOGIN
     console.log("\n[1] LOGIN...");
-    const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+    const loginRes = await testFetch(`${BASE_URL}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        email: "sajalnew02@gmail.com",
-        password: "sajal@9547",
+        email: credentials.email,
+        password: credentials.password,
       }),
     });
     const loginData = await loginRes.json();
@@ -26,7 +28,7 @@ async function test() {
     console.log("Role:", loginData.user?.role);
 
     if (!loginData.token) {
-      console.log("ERROR:", JSON.stringify(loginData));
+      console.log("ERROR:", JSON.stringify({ hasSession: Boolean(loginData?.token), message: loginData?.message }));
       return;
     }
     console.log("✅ Login OK");
@@ -34,7 +36,7 @@ async function test() {
 
     // 2. CREATE MICROJOBS SERVICE
     console.log("\n[2] CREATE MICROJOBS/FRESH SERVICE...");
-    const svc1 = await fetch(`${BASE_URL}/api/admin/services`, {
+    const svc1 = await testFetch(`${BASE_URL}/api/admin/services`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -63,7 +65,7 @@ async function test() {
 
     // 3. CREATE FOREX SERVICE
     console.log("\n[3] CREATE FOREX/CRYPTO SERVICE...");
-    const svc2 = await fetch(`${BASE_URL}/api/admin/services`, {
+    const svc2 = await testFetch(`${BASE_URL}/api/admin/services`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -91,7 +93,7 @@ async function test() {
 
     // 4. CREATE BANKS SERVICE
     console.log("\n[4] CREATE BANKS/WALLETS SERVICE...");
-    const svc3 = await fetch(`${BASE_URL}/api/admin/services`, {
+    const svc3 = await testFetch(`${BASE_URL}/api/admin/services`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -119,7 +121,7 @@ async function test() {
 
     // 5. LIST SERVICES
     console.log("\n[5] LIST ADMIN SERVICES...");
-    const listRes = await fetch(`${BASE_URL}/api/admin/services`, {
+    const listRes = await testFetch(`${BASE_URL}/api/admin/services`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const listData = await listRes.json();
@@ -131,7 +133,7 @@ async function test() {
     // 6. EDIT FIRST SERVICE
     if (services.length > 0) {
       console.log("\n[6] EDIT SERVICE:", services[0].title);
-      const editRes = await fetch(
+      const editRes = await testFetch(
         `${BASE_URL}/api/admin/services/${services[0]._id}`,
         {
           method: "PUT",
@@ -157,7 +159,7 @@ async function test() {
 
     // 7. JARVISX ADMIN: LIST SERVICES
     console.log("\n[7] JARVISX: 'show services'...");
-    const j1 = await fetch(`${BASE_URL}/api/jarvisx/chat`, {
+    const j1 = await testFetch(`${BASE_URL}/api/jarvisx/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -171,7 +173,7 @@ async function test() {
 
     // 8. JARVISX ADMIN: CREATE COMMAND
     console.log("\n[8] JARVISX: 'create a service'...");
-    const j2 = await fetch(`${BASE_URL}/api/jarvisx/chat`, {
+    const j2 = await testFetch(`${BASE_URL}/api/jarvisx/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

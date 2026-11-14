@@ -1,13 +1,15 @@
+const { baseUrl, testFetch, testCredentials } = require("./test-target");
+const credentials = testCredentials("TEST");
 // Test that greeting mid-flow resets the flow
-const BASE_URL = "https://uremo-backend.onrender.com";
+const BASE_URL = baseUrl;
 
 async function t() {
-  const l = await fetch(BASE_URL + "/api/auth/login", {
+  const l = await testFetch(BASE_URL + "/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: "sajalnew02@gmail.com",
-      password: "sajal@9547",
+      email: credentials.email,
+      password: credentials.password,
     }),
   });
   const d = await l.json();
@@ -18,7 +20,7 @@ async function t() {
 
   // Step 1: Start a flow (e.g., "buy service")
   console.log("Step 1: Start 'buy service' flow...");
-  const r1 = await fetch(BASE_URL + "/api/jarvisx/chat", {
+  const r1 = await testFetch(BASE_URL + "/api/jarvisx/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -32,7 +34,7 @@ async function t() {
 
   // Step 2: Now send "hello" while mid-flow
   console.log("Step 2: Send 'hello' mid-flow...");
-  const r2 = await fetch(BASE_URL + "/api/jarvisx/chat", {
+  const r2 = await testFetch(BASE_URL + "/api/jarvisx/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

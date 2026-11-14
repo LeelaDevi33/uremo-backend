@@ -1,13 +1,14 @@
+const { baseUrl, testFetch } = require("./test-target");
 (async () => {
-  const base = "https://uremo-backend.onrender.com";
+  const base = baseUrl;
   const email = `test+dev1+${Date.now()}@example.com`;
-  const password = "Password123!";
+  const password = require("node:crypto").randomUUID();
   let token = null;
 
   async function post(path, body, tkn) {
     const headers = { "Content-Type": "application/json" };
     if (tkn) headers.Authorization = `Bearer ${tkn}`;
-    const res = await fetch(base + path, {
+    const res = await testFetch(base + path, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -23,7 +24,7 @@
   async function get(path, tkn) {
     const headers = {};
     if (tkn) headers.Authorization = `Bearer ${tkn}`;
-    const res = await fetch(base + path, { headers });
+    const res = await testFetch(base + path, { headers });
     const text = await res.text();
     try {
       return { status: res.status, body: JSON.parse(text) };
@@ -40,7 +41,7 @@
     });
     console.log("--- SIGNUP ---");
     console.log("status:", signup.status);
-    console.log("body:", JSON.stringify(signup.body, null, 2));
+    console.log("body:", JSON.stringify({ hasSession: Boolean(signup.body?.token), message: signup.body?.message }));
     if (signup.status === 200 || signup.status === 201)
       token = signup.body.token;
   } catch (e) {
@@ -52,7 +53,7 @@
       const login = await post("/api/auth/login", { email, password });
       console.log("--- LOGIN ---");
       console.log("status:", login.status);
-      console.log("body:", JSON.stringify(login.body, null, 2));
+      console.log("body:", JSON.stringify({ hasSession: Boolean(login.body?.token), message: login.body?.message }));
       if (login.status === 200) token = login.body.token;
     } catch (e) {
       console.error("Login request failed", e);
@@ -88,7 +89,7 @@
           ? methods.body[0]?._id
           : null;
         if (orderId && methodId) {
-          const submit = await fetch(`${base}/api/orders/${orderId}/payment`, {
+          const submit = await testFetch(`${base}/api/orders/${orderId}/payment`, {
             method: "PUT",
             headers: {
               "Content-Type": "application/json",

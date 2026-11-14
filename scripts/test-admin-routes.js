@@ -1,15 +1,17 @@
+const { baseUrl, testFetch, testCredentials } = require("./test-target");
+const credentials = testCredentials("ADMIN");
 // Quick test for admin routes availability
-const BASE = "https://uremo-backend.onrender.com";
+const BASE = baseUrl;
 
 async function main() {
   console.log("Testing admin routes availability...");
 
-  const login = await fetch(`${BASE}/api/auth/login`, {
+  const login = await testFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: process.env.ADMIN_EMAIL,
-      password: process.env.ADMIN_PASSWORD,
+      email: credentials.email,
+      password: credentials.password,
     }),
   }).then((r) => r.json());
 
@@ -32,7 +34,7 @@ async function main() {
 
   console.log("\nRoute availability:");
   for (const route of routes) {
-    const res = await fetch(`${BASE}${route}`, { headers });
+    const res = await testFetch(`${BASE}${route}`, { headers });
     const emoji = res.status === 200 ? "✅" : res.status === 404 ? "❌" : "⚠️";
     console.log(`${emoji} ${route} -> ${res.status}`);
   }

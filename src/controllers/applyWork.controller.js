@@ -9,6 +9,7 @@ const {
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
 const { reviewApplication } = require("../services/adminWorkRoles");
+const { catalogFields, directoryExclusions } = require("../services/roleCatalog");
 
 const User = require("../models/User");
 const { sendEmail, getAdminEmails } = require("../services/email.service");
@@ -268,12 +269,17 @@ exports.getMyApplication = async (req, res, next) => {
       filter.position = req.query.positionId;
     }
     const app = await ApplyWork.findOne(filter)
+      .select("position positionTitle category status workerStatus createdAt updatedAt message resumeUrl resumeOriginalName resumeMimeType resumeResourceType resumeFormat")
       .sort({ createdAt: -1, _id: -1 })
-      .populate("position", "_id title category active")
+      .populate("position", catalogFields + " active")
       .lean();
     if (!app) return res.json(null);
+    const role = app.position;
+    const roleArchived = Boolean(role && (await directoryExclusions([role])).size);
     res.json({
       ...app,
+      roleArchived,
+      position: role ? { _id: role._id, title: role.title, category: role.category, active: role.active && !roleArchived } : null,
       resumeUrl: normalizeCloudinaryUrl(app.resumeUrl, {
         mimeType: app.resumeMimeType,
         resourceType: app.resumeResourceType,

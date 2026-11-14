@@ -1,11 +1,13 @@
-const BASE_URL = "https://uremo-backend.onrender.com";
+const { baseUrl, testFetch, testCredentials } = require("./test-target");
+const credentials = testCredentials("TEST");
+const BASE_URL = baseUrl;
 (async () => {
-  const l = await fetch(BASE_URL + "/api/auth/login", {
+  const l = await testFetch(BASE_URL + "/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: "sajalnew02@gmail.com",
-      password: "sajal@9547",
+      email: credentials.email,
+      password: credentials.password,
     }),
   });
   const { token } = await l.json();
@@ -18,7 +20,7 @@ const BASE_URL = "https://uremo-backend.onrender.com";
   ];
 
   for (const msg of tests) {
-    const r = await fetch(BASE_URL + "/api/jarvisx/chat", {
+    const r = await testFetch(BASE_URL + "/api/jarvisx/chat", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

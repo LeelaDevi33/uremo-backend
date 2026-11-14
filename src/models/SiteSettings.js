@@ -114,6 +114,7 @@ const siteSettingsSchema = new mongoose.Schema(
     support: {
       whatsappNumber: simpleText,
       supportEmail: simpleText,
+      emailVisible: { type: Boolean },
     },
 
     footer: {

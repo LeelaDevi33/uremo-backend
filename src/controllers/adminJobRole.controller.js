@@ -1,4 +1,5 @@
 const { paidProjectAccess } = require("../services/paidProjectAccess");
+const { catalogFields, directoryExclusions } = require("../services/roleCatalog");
 /**
  * PATCH_43: Admin Job Role Controller
  * PATCH_49: Enhanced with notifications for approval/screening unlock
@@ -194,7 +195,8 @@ exports.unlockScreening = async (req, res) => {
         .json({ ok: false, message: "Invalid applicant ID" });
     }
 
-    const job = await WorkPosition.findById(id).select("title hasScreening screeningId screeningIds").lean();
+    const job = await WorkPosition.findById(id).select(catalogFields + " hasScreening screeningId screeningIds").lean();
+    if (job && (await directoryExclusions([job])).size) return res.status(409).json({ ok: false, message: "Screening is unavailable for this archived role." });
     if (!job || (!job.screeningIds?.length && !(job.hasScreening && job.screeningId))) {
       return res.status(409).json({ ok: false, message: "Attach a screening before unlocking it" });
     }
@@ -606,8 +608,9 @@ exports.activateProject = async (req, res) => {
   try {
     const { projectId, id } = req.params;
     if (![id, projectId].every(value => mongoose.isObjectIdOrHexString(value))) throw roleError(400, "Invalid role or project ID");
-    const role = await WorkPosition.findById(id).select("category").lean();
+    const role = await WorkPosition.findById(id).select(catalogFields).lean();
     if (!role) throw roleError(404, "Role not found");
+    if ((await directoryExclusions([role])).size) throw roleError(409, "This role is archived and cannot activate new projects");
     const project = await Project.findOneAndUpdate({
       _id: projectId, status: "draft", assignedTo: null,
       $or: [{ workPositionId: id }, { workPositionId: null, category: role.category }],

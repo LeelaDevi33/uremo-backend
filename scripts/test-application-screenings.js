@@ -173,6 +173,65 @@ test("applications only qualify on their unlocked, assigned screenings", { skip:
     assert.equal((await submit(task._id)).status, 409);
   });
 
+  await t.test("archived roles preserve member history and old project settlement while closing new training and assignments", async () => {
+    const member = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: member, role: "user", email: "history@example.test",
+      walletBalance: 15, withdrawable: 15, lifetimeEarnings: 15 });
+    const archivedTest = await screening("An archived screening", "auto");
+    const archived = await Role.create({ title: "Historical design", category: "writing", active: true,
+      description: "Test position for PATCH_44 multi-job validation", hasScreening: true, screeningId: archivedTest._id,
+      trainingMaterials: [{ title: "Historical training", type: "pdf", url: "https://example.test/archived-training.pdf" }] });
+    const app = await Application.create({ user: member, position: archived._id, positionTitle: archived.title, category: archived.category,
+      status: "approved", workerStatus: "screening_unlocked", totalEarnings: 15, adminNotes: "staff private notes" });
+    const api = "/admin/workspace/job/" + archived._id, projectApi = "/admin/workspace/project/";
+    const properties = { title: "Commissioned illustration", workPositionId: archived._id, category: "writing", payRate: 5 };
+    const prior = await Project.create({ ...properties, assignedTo: member, status: "completed" });
+    const open = await Project.create({ ...properties, status: "open" });
+    const draft = await Project.create({ ...properties, status: "draft" });
+    const profile = (await call("/workspace/profile", undefined, member)).body.applications[0];
+    assert.equal(profile.roleArchived, true);
+    assert.equal(profile.positionTitle, archived.title);
+    assert.equal(profile.totalEarnings, 15);
+    assert.equal(profile.completedProjects[0]._id, String(prior._id));
+    assert.deepEqual(profile.trainingMaterials, []); assert.deepEqual(profile.requiredScreenings, []);
+    assert.equal(profile.position.description, undefined); assert.equal(profile.position.screeningId, undefined);
+    assert.equal(JSON.stringify(profile).includes("archived-training"), false);
+    const history = (await call("/apply-work/me", undefined, member)).body;
+    assert.equal(history.position._id, String(archived._id)); assert.equal(history.roleArchived, true);
+    assert.equal(history.status, "approved"); assert.equal(history.adminNotes, undefined);
+    const engagement = require("../src/services/smartEngagement.service");
+    const oldDate = new Date(Date.now() - 48 * 3600000);
+    await Application.collection.updateOne({ _id: app._id }, { $set: { updatedAt: oldDate } });
+    assert.equal((await engagement.processScreeningNudge()).notified, 0);
+    assert.equal((await call("/workspace/application/" + app._id + "/mark-training-viewed", {}, member, "PUT")).status, 409);
+    assert.deepEqual((await call("/workspace/screenings", undefined, member)).body.screenings, []);
+    assert.equal((await call(route(archivedTest._id), undefined, member)).status, 403);
+    assert.equal((await call(route(archivedTest._id) + "/submit", { positionId: app._id, answers: ["yes"] }, member)).status, 403);
+    const pending = await Application.create({ user: admin, position: archived._id, status: "pending" });
+    assert.equal((await call(api + "/approve", { applicantId: pending._id }, admin, "PUT")).status, 409);
+    assert.equal((await call(api + "/unlock-screening", { applicantId: app._id }, admin, "PUT")).status, 409);
+    await Application.updateOne({ _id: app._id }, { workerStatus: "ready_to_work",
+      screeningsCompleted: [{ screeningId: archivedTest._id, passed: true, submissionStatus: "approved" }] });
+    assert.equal((await call(api + "/projects", { title: "New assignment" }, admin)).status, 409);
+    assert.equal((await call(api + "/projects/" + draft._id + "/activate", {}, admin, "PUT")).status, 409);
+    assert.deepEqual((await call(projectApi + open._id + "/eligible-workers", undefined, admin)).body.workers, []);
+    assert.equal((await call(projectApi + open._id + "/assign", { workerId: app._id }, admin, "PUT")).status, 409);
+    assert.deepEqual(await engagement.notifyReadyWorkers(null, null, String(open._id)), { notified: 0, emailed: 0 });
+    assert.equal((await call("/workspace/project/" + prior._id, undefined, member)).status, 200);
+    assert.equal((await call(projectApi + prior._id + "/credit", { amount: 5 }, admin, "PUT")).status, 200);
+    assert.equal((await call(projectApi + prior._id + "/credit", { amount: 5 }, admin, "PUT")).status, 409);
+    assert.equal((await User.findById(member)).walletBalance, 20);
+    const legacyScreening = await Screening.create({ title: "Unlinked historical role", category: "teaching", evaluationMode: "auto",
+      questions: [{ question: "Choose yes", options: ["yes", "no"], correctAnswer: "yes" }] });
+    const legacy = await Application.create({ user: member, category: "teaching", status: "approved", workerStatus: "screening_unlocked" });
+    await Application.collection.updateOne({ _id: legacy._id }, { $set: { updatedAt: oldDate } });
+    assert.equal((await engagement.processScreeningNudge()).notified, 1);
+    const freshProfile = (await call("/workspace/profile", undefined, member)).body.applications.find(a => a._id === String(legacy._id));
+    assert.equal(freshProfile.roleArchived, false);
+    assert.equal(freshProfile.requiredScreenings[0]._id, String(legacyScreening._id));
+    assert.equal((await call("/workspace/application/" + legacy._id + "/mark-training-viewed", {}, member, "PUT")).status, 200);
+    assert.equal((await call(route(legacyScreening._id) + "/submit", { positionId: legacy._id, answers: ["yes"] }, member)).status, 200);
+  });
   await t.test("legacy reset commands cannot erase operational balances", async () => {
     await User.updateOne({ _id: user }, { walletBalance: 31, affiliateBalance: 9 });
     for (const [operation, confirm] of [["wallets", "RESET_ALL_WALLETS"], ["affiliate", "RESET_ALL_AFFILIATE"], ["all-test-data", "RESET_ALL_TEST_DATA"]]) {

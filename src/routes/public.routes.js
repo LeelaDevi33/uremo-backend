@@ -6,7 +6,7 @@
 const express = require("express");
 const router = express.Router();
 const { publicOfferFacts } = require("../controllers/opportunity.controller");
-const { specializationRoles } = require("../services/roleCatalog");
+const { catalogFields, specializationRoles } = require("../services/roleCatalog");
 
 /**
  * GET /api/public/trust
@@ -40,7 +40,7 @@ router.get("/stats", async (req, res) => {
     const [offers, roles, totalUsers, completedOrders] =
       await Promise.all([
         publicOfferFacts(),
-        WorkPosition.find({ active: true }).select("title category serviceId").lean().then(roles => specializationRoles(roles)),
+        WorkPosition.find({ active: true }).select(catalogFields).lean().then(roles => specializationRoles(roles)),
         User.countDocuments({ role: { $ne: "admin" } }),
         Order.countDocuments({ status: "completed" }),
       ]);

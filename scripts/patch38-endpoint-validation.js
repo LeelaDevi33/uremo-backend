@@ -1,3 +1,4 @@
+const { baseUrl, testFetch } = require("./test-target");
 /**
  * PATCH_38: Endpoint Validation (No Auth Required)
  * Tests all API endpoints exist and respond correctly
@@ -5,7 +6,7 @@
  * Run: node scripts/patch38-endpoint-validation.js
  */
 
-const BASE_URL = process.env.API_URL || "https://uremo-backend.onrender.com";
+const BASE_URL = baseUrl;
 
 // Test results storage
 const results = {
@@ -35,7 +36,7 @@ async function testEndpoint(category, endpoint, options = {}) {
     const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
 
-    const res = await fetch(`${BASE_URL}${endpoint}`, opts);
+    const res = await testFetch(`${BASE_URL}${endpoint}`, opts);
     const data = await res.json().catch(() => ({}));
 
     if (requiresAuth && res.status === 401) {

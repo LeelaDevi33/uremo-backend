@@ -1,10 +1,12 @@
+const { baseUrl, testCredentials } = require("./test-target");
+const credentials = testCredentials("ADMIN");
 /**
  * Test Referral Code Linking - Live Production Test
  */
 
-const axios = require("axios");
+const axios = require("axios").create({ maxRedirects: 0 });
 const fs = require("fs");
-const BASE = "https://uremo-backend.onrender.com/api";
+const BASE = baseUrl + "/api";
 
 const output = [];
 function log(msg) {
@@ -17,8 +19,8 @@ async function testReferral() {
     // 1. Login as admin to get a valid referral code
     console.log("1. Getting admin referral code...");
     const login = await axios.post(BASE + "/auth/login", {
-      email: "sajalnew02@gmail.com",
-      password: "sajal@9547",
+      email: credentials.email,
+      password: credentials.password,
     });
     console.log("   Admin referralCode:", login.data.user.referralCode);
     console.log("   Admin userId:", login.data.user._id || login.data.user.id);
