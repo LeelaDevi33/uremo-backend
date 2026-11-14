@@ -68,6 +68,8 @@ $env:UREMO_TEST_MONGO_PORT='27347'
 node --test scripts/test-opportunity-marketplace.js scripts/test-marketplace-cutover.js scripts/test-wallet-settlement.js scripts/test-prepare-opportunity-drafts.js
 ```
 
+The older standalone scripts that create accounts, roles, orders or referrals require `UREMO_STAGING_API_URL` set to the loopback or staging API origin. Give the script a synthetic `TEST_EMAIL` and `TEST_PASSWORD` for member sign-in, or `ADMIN_EMAIL` and `ADMIN_PASSWORD` for admin operations. The supported replica-set suites above generate their own users.
+
 ## Check the admin and worker views before releasing
 
 Use separate browser profiles for the local demo admin and worker. For tests that create receipts or issue credits, use a disposable local database and synthetic balances.

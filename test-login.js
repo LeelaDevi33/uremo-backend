@@ -1,15 +1,17 @@
+const { baseUrl, testFetch, testCredentials } = require("./scripts/test-target");
+const credentials = testCredentials("TEST");
 (async () => {
-  const base = "https://uremo-backend.onrender.com";
+  const base = baseUrl;
 
   console.log("🔐 Testing LOGIN API...\n");
 
   try {
-    const res = await fetch(`${base}/api/auth/login`, {
+    const res = await testFetch(`${base}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        email: "final@uremo.online",
-        password: "test1234",
+        email: credentials.email,
+        password: credentials.password,
       }),
     });
 
@@ -19,16 +21,12 @@
     if (res.status === 200 && data.token) {
       console.log("✅ LOGIN SUCCESSFUL!\n");
       console.log("Response:");
-      console.log(JSON.stringify(data, null, 2));
-      console.log(
-        "\n📋 Token (first 50 chars):",
-        data.token.substring(0, 50) + "..."
-      );
+      console.log(JSON.stringify({ hasSession: Boolean(data?.token), message: data?.message }));
 
       // Test protected route
       console.log("\n\n🔒 Testing PROTECTED ROUTE...\n");
 
-      const ordersRes = await fetch(`${base}/api/orders/my`, {
+      const ordersRes = await testFetch(`${base}/api/orders/my`, {
         headers: {
           Authorization: `Bearer ${data.token}`,
         },
@@ -47,7 +45,7 @@
     } else {
       console.log("❌ LOGIN FAILED\n");
       console.log("Response:");
-      console.log(JSON.stringify(data, null, 2));
+      console.log(JSON.stringify({ hasSession: Boolean(data?.token), message: data?.message }));
     }
   } catch (error) {
     console.error("❌ Error:", error.message);

@@ -1,9 +1,10 @@
+const { baseUrl, testFetch } = require("./test-target");
 /**
  * PATCH_21 Service API Tests
  * Tests service creation, update, and listing with new rentals category
  */
 
-const BASE_URL = process.env.API_URL || "https://uremo-backend.onrender.com";
+const BASE_URL = baseUrl;
 
 async function request(method, path, body, token) {
   const headers = { "Content-Type": "application/json" };
@@ -15,7 +16,7 @@ async function request(method, path, body, token) {
   }
 
   try {
-    const res = await fetch(`${BASE_URL}${path}`, options);
+    const res = await testFetch(`${BASE_URL}${path}`, options);
     const text = await res.text();
     let data;
     try {

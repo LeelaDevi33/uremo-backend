@@ -1,3 +1,4 @@
+const { baseUrl, testFetch } = require("./test-target");
 /**
  * PATCH_38: Real Transaction Flow Validation
  * Tests actual user journeys across BUY, RENT, DEAL, and WORKSPACE flows
@@ -5,7 +6,7 @@
  * Run: node scripts/patch38-flow-validation.js
  */
 
-const BASE_URL = process.env.API_URL || "https://uremo-backend.onrender.com";
+const BASE_URL = baseUrl;
 
 // REQUIRED: Set these environment variables before running
 // TEST_EMAIL and TEST_PASSWORD must be valid credentials
@@ -52,7 +53,7 @@ async function apiCall(endpoint, method = "GET", body = null, token = null) {
   const opts = { method, headers };
   if (body && method !== "GET") opts.body = JSON.stringify(body);
 
-  const res = await fetch(`${BASE_URL}${endpoint}`, opts);
+  const res = await testFetch(`${BASE_URL}${endpoint}`, opts);
   const data = await res.json().catch(() => ({}));
   return { status: res.status, ok: res.ok, data };
 }
@@ -99,8 +100,8 @@ async function testBuyFlow() {
   // Step 2-3: Login as test user (use existing admin for testing)
   // In real scenario, would create user
   const loginRes = await apiCall("/api/auth/login", "POST", {
-    email: process.env.TEST_EMAIL || "admin@uremo.online",
-    password: process.env.TEST_PASSWORD || "admin123",
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
   });
 
   if (!loginRes.ok || !loginRes.data?.token) {
@@ -260,8 +261,8 @@ async function testRentalFlow() {
 
   // Login
   const loginRes = await apiCall("/api/auth/login", "POST", {
-    email: process.env.TEST_EMAIL || "admin@uremo.online",
-    password: process.env.TEST_PASSWORD || "admin123",
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
   });
 
   if (!loginRes.ok) {
@@ -336,8 +337,8 @@ async function testDealFlow() {
 
   // Login
   const loginRes = await apiCall("/api/auth/login", "POST", {
-    email: process.env.TEST_EMAIL || "admin@uremo.online",
-    password: process.env.TEST_PASSWORD || "admin123",
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
   });
 
   if (!loginRes.ok) {
@@ -431,8 +432,8 @@ async function testWorkspaceFlow() {
 
   // Login
   const loginRes = await apiCall("/api/auth/login", "POST", {
-    email: process.env.TEST_EMAIL || "admin@uremo.online",
-    password: process.env.TEST_PASSWORD || "admin123",
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
   });
 
   if (!loginRes.ok) {
@@ -536,8 +537,8 @@ async function testCrossSync() {
 
   // Login as admin
   const loginRes = await apiCall("/api/auth/login", "POST", {
-    email: process.env.TEST_EMAIL || "admin@uremo.online",
-    password: process.env.TEST_PASSWORD || "admin123",
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
   });
 
   if (!loginRes.ok) {

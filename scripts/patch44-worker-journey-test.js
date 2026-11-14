@@ -1,9 +1,10 @@
+const { baseUrl, testFetch, testCredentials } = require("./test-target");
 /**
  * PATCH_44: Microjob Real-World Simulation Test
  * Complete Worker Journey Validation
  */
 
-const BASE = process.env.API_BASE || "https://uremo-backend.onrender.com";
+const BASE = baseUrl;
 
 // Test state
 const state = {
@@ -35,7 +36,7 @@ async function request(method, path, body = null, token = null) {
   if (body && method !== "GET") opts.body = JSON.stringify(body);
 
   try {
-    const res = await fetch(BASE + path, opts);
+    const res = await testFetch(BASE + path, opts);
     const text = await res.text();
     let data;
     try {
@@ -232,8 +233,7 @@ async function phase1() {
 
   // Try to get admin token
   const adminLogin = await post("/api/auth/login", {
-    email: process.env.ADMIN_EMAIL || "admin@uremo.com",
-    password: process.env.ADMIN_PASSWORD || "admin123",
+    ...testCredentials("ADMIN"),
   });
 
   if (adminLogin.ok && adminLogin.data?.token) {
