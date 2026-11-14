@@ -26,6 +26,38 @@ test("marketplace cutover preserves history and reports only settled project rev
     if (data) headers["Content-Type"] = "application/json";
     return fetch(`http://127.0.0.1:${server.address().port}/api` + path, { headers, method, body: JSON.stringify(data) });
   }
+  await t.test("marketplace copy follows the admin editor and stale saves preserve the published version", async () => {
+    const Settings = require("../src/models/SiteSettings");
+    const firstViews = await Promise.all(Array.from({ length: 5 }, () => request("/settings/public", "GET", null)));
+    assert.ok(firstViews.every(response => response.status === 200));
+    assert.equal(await Settings.countDocuments({ singletonKey: "main" }), 1);
+    const original = await (await request("/admin/settings", "GET", editor)).json();
+    const raw = await (await request("/admin/settings/raw", "GET", editor)).json();
+    assert.ok(original.revision);
+    assert.equal(raw.revision, original.revision);
+    const changes = { marketplace: { rolesTitle: "Synthetic roles", rentIntro: "Qualified workers can rent." }, expectedRevision: original.revision };
+    assert.equal((await request("/admin/settings", "PUT", worker, changes)).status, 403);
+    const responses = await Promise.all([request("/admin/settings", "PUT", editor, changes), request("/admin/settings", "PUT", editor, changes)]);
+    assert.deepEqual(responses.map(response => response.status).sort(), [200, 409]);
+    const saved = await responses.find(response => response.status === 200).json();
+    assert.notEqual(saved.revision, original.revision);
+    const published = await (await request("/settings/public", "GET", null)).json();
+    assert.equal(published.marketplace.rolesTitle, "Synthetic roles");
+    assert.equal(published.marketplace.rentIntro, "Qualified workers can rent.");
+    assert.equal(published.marketplace.buyTitle, "Full Access projects");
+    assert.equal(published.support.supportEmail, "");
+    assert.ok(!Object.hasOwn(published, "updatedBy"));
+    const patch = { settings: { marketplace: { rolesTitle: "Second title" } }, expectedRevision: raw.revision };
+    for (const mode of ["replace", "merge"]) {
+      assert.equal((await request("/admin/settings/raw", "PUT", editor, { ...patch, mode })).status, 409);
+    }
+    assert.equal((await request("/admin/settings", "PUT", editor, { marketplace: { rolesIntro: "x".repeat(301) } })).status, 400);
+    assert.equal((await request("/admin/settings/raw", "PUT", editor, { ...patch, mode: "merge", expectedRevision: saved.revision })).status, 200);
+    const final = await (await request("/settings/public", "GET", null)).json();
+    assert.equal(final.marketplace.rolesTitle, "Second title");
+    assert.equal(final.marketplace.rentIntro, "Qualified workers can rent.");
+    assert.equal(final.marketplace.buyTitle, "Full Access projects");
+  });
   await t.test("ticket replies return the persisted state and closed tickets require explicit reopening", async () => {
     const Ticket = require("../src/models/Ticket");
     for (const [initial, expected] of [["open", "in_progress"], ["closed", "closed"], ["waiting_user", "waiting_user"]]) {
@@ -57,6 +89,14 @@ test("marketplace cutover preserves history and reports only settled project rev
     assert.deepEqual(list.filters.categories, ["opportunities"]);
     assert.equal((await (await request("/blogs?category=forex_crypto", "GET", null)).json()).meta.total, 0);
     assert.equal((await request("/blogs/retired", "GET", null)).status, 404);
+    const published = await Blog.findOne({ title: post.title }).lean();
+    const article = "/blogs/" + published.slug;
+    assert.equal((await request(article + "?countView=false", "GET", null)).status, 200);
+    assert.equal((await Blog.findById(published._id)).viewCount, 0);
+    assert.equal((await request(article + "/view", "POST", null)).status, 204);
+    assert.equal((await request(article, "GET", null)).status, 200);
+    assert.equal((await Blog.findById(published._id)).viewCount, 2);
+    assert.equal((await request("/blogs/retired/view", "POST", null)).status, 404);
     assert.equal((await request("/admin/blogs/" + archive._id, "GET", editor)).status, 200);
     assert.equal((await request("/admin/blogs/" + archive._id, "PUT", editor, { status: "draft" })).status, 200);
     assert.equal((await request("/admin/campaigns/send", "POST", editor, { title: "Fixture", message: "Fixture", targetTags: ["forex"] })).status, 400);

@@ -1,6 +1,14 @@
 const SiteSettings = require("../models/SiteSettings");
 
 const DEFAULTS = {
+  marketplace: {
+    rolesTitle: "Open roles",
+    rolesIntro: "Find a specialization that fits your skills. Apply for free to qualify for matching projects.",
+    rentTitle: "Rent projects",
+    rentIntro: "Rent a specific project for a fixed term after qualifying for its specialization.",
+    buyTitle: "Full Access projects",
+    buyIntro: "Get permanent, exclusive access to a specific project with one payment. Anyone can purchase.",
+  },
   site: {
     brandName: "UREMO",
     bannerText:
@@ -8,7 +16,7 @@ const DEFAULTS = {
   },
   support: {
     whatsappNumber: "",
-    supportEmail: "support@uremo.online",
+    supportEmail: "",
   },
   footer: {
     disclaimer:
@@ -218,23 +226,28 @@ const ensureMainSettings = async () => {
   const existing = await SiteSettings.findOne({ singletonKey: "main" });
   if (existing) return existing;
 
-  const now = new Date();
-  const created = await SiteSettings.create({
-    singletonKey: "main",
-    site: DEFAULTS.site,
-    support: DEFAULTS.support,
-    footer: DEFAULTS.footer,
-    landing: DEFAULTS.landing,
-    payment: DEFAULTS.payment,
-    orders: DEFAULTS.orders,
-    services: DEFAULTS.services,
-    orderSupport: DEFAULTS.orderSupport,
-    applyWork: DEFAULTS.applyWork,
-    updatedAt: now,
-  });
-
-  return created;
+  try {
+    return await SiteSettings.findOneAndUpdate({ singletonKey: "main" },
+      { $setOnInsert: { ...DEFAULTS, updatedAt: new Date() } },
+      { upsert: true, returnDocument: "after" });
+  } catch (err) {
+    if (err.code !== 11000) throw err;
+    return SiteSettings.findOne({ singletonKey: "main" });
+  }
 };
+
+const revisionOf = doc => (doc.updatedAt || doc._id.getTimestamp()).toISOString();
+const conflict = () => Object.assign(new Error("Settings changed. Reload the current settings before saving your edits."), { status: 409 });
+
+async function settingsWrite(expected) {
+  const doc = await ensureMainSettings();
+  const revision = revisionOf(doc);
+  if (expected !== undefined && expected !== revision) throw conflict();
+  return {
+    filter: { _id: doc._id, updatedAt: doc.updatedAt || null },
+    updatedAt: new Date(Math.max(Date.now(), Date.parse(revision) + 1)),
+  };
+}
 
 const publicProjection = (doc) => {
   // Backward compatibility: support older keys (bannerText + faq.*)
@@ -439,6 +452,8 @@ const publicProjection = (doc) => {
 
   return {
     site,
+    marketplace: Object.fromEntries(Object.entries(DEFAULTS.marketplace).map(([key, fallback]) =>
+      [key, String(doc?.marketplace?.[key] || "").trim() || fallback])),
     support,
     footer,
     landing,
@@ -471,7 +486,7 @@ exports.getAdminSettings = async (req, res) => {
   try {
     const doc = await ensureMainSettings();
     await doc.populate("updatedBy", "_id name email role");
-    return res.json(doc);
+    return res.set("Cache-Control", "private, no-store").json({ ...doc.toObject(), revision: revisionOf(doc) });
   } catch (err) {
     return res.status(500).json({ message: err?.message || "Server error" });
   }
@@ -500,12 +515,12 @@ exports.applyAdminSettingsPatch = async ({ patch, updatedBy }) => {
     throw err;
   }
 
-  await ensureMainSettings();
+  const write = await settingsWrite();
 
   const sanitizedPatch = stripSystemFieldsForMerge(patch);
   const update = deepMerge(
     {
-      updatedAt: new Date(),
+      updatedAt: write.updatedAt,
       updatedBy: updatedBy || undefined,
     },
     sanitizedPatch
@@ -513,11 +528,12 @@ exports.applyAdminSettingsPatch = async ({ patch, updatedBy }) => {
 
   const flattened = flattenForSet(update);
 
-  await SiteSettings.findOneAndUpdate(
-    { singletonKey: "main" },
+  const updated = await SiteSettings.findOneAndUpdate(
+    write.filter,
     { $set: flattened },
     { new: false, runValidators: true }
   );
+  if (!updated) throw conflict();
 
   return true;
 };
@@ -526,12 +542,22 @@ exports.updateAdminSettings = async (req, res) => {
   try {
     const body = req.body || {};
 
-    await ensureMainSettings();
+    const write = await settingsWrite(body.expectedRevision);
 
     // Accept legacy payload fields too.
     const legacyBannerText = clampString(body.bannerText, 240);
 
     const patch = {};
+    if (hasOwn(body, "marketplace")) {
+      if (!isPlainSettingsObject(body.marketplace)) return res.status(400).json({ message: "Invalid marketplace text" });
+      patch.marketplace = {};
+      for (const [key, value] of Object.entries(body.marketplace)) {
+        if (!hasOwn(DEFAULTS.marketplace, key) || typeof value !== "string" || value.trim().length > (key.endsWith("Title") ? 100 : 300)) {
+          return res.status(400).json({ message: "Invalid marketplace text" });
+        }
+        patch.marketplace[key] = value.trim();
+      }
+    }
 
     if (hasOwn(body, "site")) {
       patch.site = {};
@@ -804,21 +830,22 @@ exports.updateAdminSettings = async (req, res) => {
         patch.faq.orderSupport = sanitizeFaqArray(body.faq.orderSupport);
     }
 
-    patch.updatedAt = new Date();
+    patch.updatedAt = write.updatedAt;
     patch.updatedBy = req.user?.id;
 
     const updateSet = flattenForSet(patch);
 
     const updated = await SiteSettings.findOneAndUpdate(
-      { singletonKey: "main" },
+      write.filter,
       { $set: updateSet },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
 
+    if (!updated) throw conflict();
     await updated.populate("updatedBy", "_id name email role");
-    return res.json(updated);
+    return res.json({ ...updated.toObject(), revision: revisionOf(updated) });
   } catch (err) {
-    return res.status(500).json({ message: err?.message || "Server error" });
+    return res.status(err.status || 500).json({ message: err?.message || "Server error" });
   }
 };
 
@@ -860,9 +887,8 @@ const clampSettingsJsonSize = (settings, maxBytes) => {
 
 exports.getAdminSettingsRaw = async (req, res) => {
   try {
-    await ensureMainSettings();
-    const doc = await SiteSettings.findOne({ singletonKey: "main" }).lean();
-    return res.json({ settings: doc || null });
+    const doc = await ensureMainSettings();
+    return res.set("Cache-Control", "private, no-store").json({ settings: doc, revision: revisionOf(doc) });
   } catch (err) {
     return res.status(500).json({ message: err?.message || "Server error" });
   }
@@ -896,20 +922,20 @@ exports.putAdminSettingsRaw = async (req, res) => {
       });
     }
 
-    await ensureMainSettings();
+    const write = await settingsWrite(body.expectedRevision);
 
     if (mode === "replace") {
       const nextDoc = { ...incoming };
       delete nextDoc._id;
       delete nextDoc.__v;
       nextDoc.singletonKey = "main";
-      nextDoc.updatedAt = new Date();
+      nextDoc.updatedAt = write.updatedAt;
       nextDoc.updatedBy = req.user?.id;
 
-      await SiteSettings.findOneAndReplace({ singletonKey: "main" }, nextDoc, {
-        upsert: true,
+      const prior = await SiteSettings.findOneAndReplace(write.filter, nextDoc, {
         runValidators: true,
       });
+      if (!prior) throw conflict();
 
       return res.json({
         message: "Settings updated",
@@ -922,7 +948,7 @@ exports.putAdminSettingsRaw = async (req, res) => {
     const sanitizedIncoming = stripSystemFieldsForMerge(incoming);
     const update = deepMerge(
       {
-        updatedAt: new Date(),
+        updatedAt: write.updatedAt,
         updatedBy: req.user?.id,
       },
       sanitizedIncoming
@@ -930,11 +956,12 @@ exports.putAdminSettingsRaw = async (req, res) => {
 
     const flattened = flattenForSet(update);
 
-    await SiteSettings.findOneAndUpdate(
-      { singletonKey: "main" },
+    const prior = await SiteSettings.findOneAndUpdate(
+      write.filter,
       { $set: flattened },
       { new: false, runValidators: true }
     );
+    if (!prior) throw conflict();
 
     return res.json({
       message: "Settings updated",
@@ -942,8 +969,8 @@ exports.putAdminSettingsRaw = async (req, res) => {
       updated: true,
     });
   } catch (err) {
-    return res.status(400).json({
-      message: "Invalid settings JSON",
+    return res.status(err.status || 400).json({
+      message: err.status === 409 ? err.message : "Invalid settings JSON",
       details: err?.message || "Unknown error",
     });
   }

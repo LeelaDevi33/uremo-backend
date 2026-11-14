@@ -9,6 +9,7 @@ const { executeTool } = require("./tools");
 const Service = require("../models/Service");
 const PaymentMethod = require("../models/PaymentMethod");
 const WorkPosition = require("../models/WorkPosition");
+const { getPublicSettingsObject } = require("../controllers/siteSettings.controller");
 
 function normalizeText(value) {
   return String(value || "")
@@ -311,7 +312,7 @@ async function buildContext(intent, context, params = {}) {
           ...baseContext,
           data: {
             canCreateTicket: !!context.userId,
-            supportEmail: "support@uremo.online",
+            supportEmail: (await getPublicSettingsObject()).support.supportEmail || null,
           },
         };
       }
