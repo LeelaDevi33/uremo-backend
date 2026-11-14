@@ -331,10 +331,9 @@ exports.getBlogBySlug = async (req, res) => {
       });
     }
 
-    // Increment view count (fire and forget)
-    Blog.updateOne({ _id: blog._id }, { $inc: { viewCount: 1 } }).catch(
-      () => {},
-    );
+    if (req.query.countView !== "false") {
+      await Blog.updateOne({ _id: blog._id, ...publicBlogs }, { $inc: { viewCount: 1 } }, { timestamps: false });
+    }
 
     res.json({
       ok: true,
@@ -350,6 +349,13 @@ exports.getBlogBySlug = async (req, res) => {
       message: err.message || "Failed to fetch blog",
     });
   }
+};
+
+exports.recordView = async (req, res) => {
+  setNoCache(res);
+  const result = await Blog.updateOne({ slug: req.params.slug, ...publicBlogs }, { $inc: { viewCount: 1 } }, { timestamps: false });
+  if (!result.matchedCount) return res.status(404).json({ ok: false, message: "Blog not found" });
+  return res.sendStatus(204);
 };
 
 /**

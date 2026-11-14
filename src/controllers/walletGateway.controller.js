@@ -2,6 +2,7 @@ const WalletTransaction = require("../models/WalletTransaction");
 const User = require("../models/User");
 const { isWalletAmount, changeFunds } = require("../services/walletFunds");
 const paypal = require("../config/paypal");
+const { getFrontendUrl } = require("../config/frontendUrl");
 const { gatewayStatus } = require("../services/walletFunding");
 
 const error = (status, message) => Object.assign(new Error(message), { status });
@@ -37,7 +38,7 @@ exports.create = handler(async req => {
   const tx = await WalletTransaction.create({ user: user._id, type: "credit", source: "topup", amount, status: "initiated",
     provider: "paypal", gatewayMode: paypal.status().mode, description: "Wallet top-up via PayPal", balanceBefore: user.walletBalance || 0 });
   try {
-    const frontend = new URL("/wallet", process.env.FRONTEND_URL || "https://uremo.online").href;
+    const frontend = new URL("/wallet", getFrontendUrl()).href;
     const order = await paypal.create(token, { intent: "CAPTURE", purchase_units: [{ custom_id: String(tx._id),
       payee: { merchant_id: process.env.PAYPAL_MERCHANT_ID }, amount: { currency_code: "USD", value: amount.toFixed(2) } }],
       payment_source: { paypal: { experience_context: { user_action: "PAY_NOW", return_url: frontend + "?paypal=success",
