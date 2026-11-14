@@ -63,10 +63,15 @@ test("joined sockets recheck status, ownership and recipients for every new mess
   t.after(() => new Promise(resolve => io.close(resolve)));
   const base = "http://127.0.0.1:" + server.address().port + "/socket.io/?EIO=4&transport=polling";
   const owner = new mongoose.Types.ObjectId();
+  const strangerId = new mongoose.Types.ObjectId();
+  await User.collection.insertMany([
+    { _id: owner, role: "user", email: "worker@example.test" },
+    { _id: strangerId, role: "user", email: "other@example.test" },
+  ]);
   const order = await Order.collection.insertOne({ userId: owner, status: "cancelled" });
   const orderId = String(order.insertedId);
   const worker = await client(base, { id: String(owner), role: "user" });
-  const stranger = await client(base, { id: String(new mongoose.Types.ObjectId()), role: "user" });
+  const stranger = await client(base, { id: String(strangerId), role: "user" });
   const adminId = new mongoose.Types.ObjectId();
   const adminClaims = { id: String(adminId), role: "admin" };
   await User.collection.insertOne({ _id: adminId, role: "admin", email: "admin@example.test" });

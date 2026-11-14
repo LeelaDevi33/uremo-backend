@@ -33,7 +33,12 @@ test("multipart proof and image uploads pass through the Cloudinary SDK", async 
   const app = require("express")();
   app.use("/api/upload", require("../src/routes/upload.routes"));
   const base = await listen(createServer(app), t);
-  const token = jwt.sign({ id: randomBytes(12).toString("hex") }, process.env.JWT_SECRET);
+  const id = randomBytes(12).toString("hex");
+  t.mock.method(require("../src/models/User"), "findById", requested => {
+    assert.equal(requested, id);
+    return { select: () => ({ lean: async () => ({ _id: id, role: "user" }) }) };
+  });
+  const token = jwt.sign({ id }, process.env.JWT_SECRET);
   const headers = { Authorization: "Bearer " + token };
 
   for (const [route, field, mime, expected, contents] of [

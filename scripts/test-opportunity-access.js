@@ -41,6 +41,28 @@ test("customer rental access and legacy application administration", { skip: !po
     return { status: response.status, body: await response.json(), headers: response.headers };
   }
 
+  await t.test("a password reset is single use and retires prior user sessions", async () => {
+    const { createHash } = require("node:crypto");
+    const reset = randomUUID(), account = await User.create({
+      email: "reset@example.test", role: "user", name: "Reset fixture", password: "Initial-Pass9",
+      passwordResetToken: createHash("sha256").update(reset).digest("hex"), passwordResetExpires: new Date(Date.now() + 60000),
+    });
+    const oldToken = token(account._id, "user");
+    assert.equal((await request("/api/auth/me", oldToken)).status, 200);
+    const passwords = ["One-New-Pass9", "Two-New-Pass9"];
+    const attempts = await Promise.all(passwords.map(password =>
+      request("/api/auth/reset-password", null, "POST", { token: reset, password })));
+    assert.deepEqual(attempts.map(row => row.status).sort(), [200, 400]);
+    assert.equal((await request("/api/auth/me", oldToken)).status, 401);
+    const password = passwords[attempts.findIndex(row => row.status === 200)];
+    const login = await request("/api/auth/login", null, "POST", { email: account.email, password });
+    assert.equal(login.status, 200);
+    const fresh = login.body.token;
+    assert.equal((await request("/api/auth/me", fresh)).status, 200);
+    await User.deleteOne({ _id: account._id });
+    assert.equal((await request("/api/auth/me", fresh)).status, 401);
+  });
+
   await t.test("legacy admin list and status update require a current database admin role", async () => {
     const appId = id();
     await Worker.collection.insertOne({ _id: appId, userId: owner, status: "pending", email: "qa@example.test" });

@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const OrderMessage = require("../models/OrderMessage");
-const { liveAdminIds } = require("../services/tokenIdentity");
+const { activeAccounts, sessionIsCurrent } = require("../services/tokenIdentity");
 const { orderChatDenial } = require("../services/orderChatPolicy");
 
 // In-memory SSE subscribers: orderId -> Set(res)
@@ -32,11 +32,12 @@ async function broadcastMessage(order, payload) {
   // Default event type is "message" when no `event:` line is provided.
   const data = `id: ${eventId}\ndata: ${JSON.stringify(payload)}\n\n`;
   const recipients = [...set];
-  const admins = await liveAdminIds(recipients.map(res => res.req.user));
+  const accounts = await activeAccounts(recipients.map(res => res.req.user));
   for (const res of recipients) {
     try {
       const user = res.req.user;
-      if ((user?.exp && user.exp * 1000 <= Date.now()) || orderChatDenial(order, user?.id, admins.has(String(user?.id)))) {
+      const account = accounts.get(String(user.id));
+      if (!sessionIsCurrent(user, account) || orderChatDenial(order, user.id, user.role === "admin" && account.role === "admin")) {
         set.delete(res);
         res.end();
         continue;

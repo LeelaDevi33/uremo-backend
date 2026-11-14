@@ -1,4 +1,4 @@
-const { tokenIdentity, liveAdminIds } = require("../services/tokenIdentity");
+const { tokenIdentity, activeAccounts, sessionIsCurrent } = require("../services/tokenIdentity");
 /**
  * Socket.io server setup and event handlers for realtime chat.
  */
@@ -98,8 +98,8 @@ async function handleConnection(socket) {
   // Long-lived connections also revalidate privileges after the handshake.
   socket.use(async (_packet, next) => {
     try {
-      if (socket.user.exp && socket.user.exp * 1000 <= Date.now()) return socket.disconnect(true);
-      if (isAdmin && !(await liveAdminIds([socket.user])).has(String(userId))) {
+      const identity = await tokenIdentity(socket.user);
+      if (isAdmin && !identity.isAdmin) {
         leaveOrder();
         socket.leave("admin:orders");
         socket.join("order-chat:workers");
@@ -474,13 +474,15 @@ async function broadcastOrderMessage(order, payload) {
     for (const id of io.sockets.adapter.rooms.get("admin:orders") || []) listeners.add(id);
   }
   const sockets = [...listeners].map(id => io.sockets.sockets.get(id)).filter(Boolean);
-  const admins = await liveAdminIds(sockets.map(socket => socket.user));
+  if (!sockets.length) return;
+  const accounts = await activeAccounts(sockets.map(socket => socket.user));
   for (const socket of sockets) {
-    if (socket.user.exp && socket.user.exp * 1000 <= Date.now()) {
+    const account = accounts.get(String(socket.user.id));
+    if (!sessionIsCurrent(socket.user, account)) {
       socket.disconnect(true);
       continue;
     }
-    const isAdmin = admins.has(String(socket.user.id));
+    const isAdmin = socket.user.role === "admin" && account.role === "admin";
     if (socket.rooms.has(room) && !orderChatDenial(order, socket.user.id, isAdmin)) socket.emit("message:new", payload);
     if (isAdmin && payload.senderRole === "user" && socket.rooms.has("admin:orders")) {
       socket.emit("admin:order_message", { orderId: String(order._id), message: payload });

@@ -4,6 +4,7 @@ const bcryptjs = require("bcryptjs");
 
 const { sendEmail } = require("../services/email.service");
 const { welcomeEmail } = require("../emails/templates");
+const { getFrontendUrl } = require("../config/frontendUrl");
 
 // PATCH_54: Standardized error codes
 const AUTH_ERRORS = {
@@ -156,7 +157,7 @@ exports.signup = async (req, res, next) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role, sessionVersion: user.sessionVersion || 0 },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -266,7 +267,7 @@ exports.login = async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role, sessionVersion: user.sessionVersion || 0 },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -367,8 +368,7 @@ exports.resetPasswordWithSecret = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    user.password = String(nextPassword);
-    await user.save();
+    if (!await changePassword({ _id: user._id }, String(nextPassword))) return res.status(404).json({ message: "User not found" });
 
     return res.json({
       message: "Password updated",
@@ -510,7 +510,7 @@ exports.forgotPassword = async (req, res) => {
 
     // Send reset email (best effort)
     try {
-      const resetUrl = `${process.env.FRONTEND_URL || "https://uremo.online"}/reset-password?token=${resetToken}`;
+      const resetUrl = `${getFrontendUrl()}/reset-password?token=${resetToken}`;
       await sendEmail({
         to: user.email,
         subject: "Password Reset Request - UREMO",
@@ -549,7 +549,7 @@ exports.resetPassword = async (req, res) => {
   try {
     const { token, password } = req.body;
 
-    if (!token || !password) {
+    if (typeof token !== "string" || !token || !password) {
       return res.status(400).json({
         success: false,
         code: "MISSING_FIELDS",
@@ -570,24 +570,20 @@ exports.resetPassword = async (req, res) => {
     const crypto = require("crypto");
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
-    const user = await User.findOne({
+    const filter = {
       passwordResetToken: tokenHash,
       passwordResetExpires: { $gt: new Date() },
-    });
+    };
 
-    if (!user) {
+    // Avoid password hashing for unrelated/expired tokens. The update rechecks
+    // the same single-use token so simultaneous requests cannot both succeed.
+    if (!await User.exists(filter) || !await changePassword(filter, password)) {
       return res.status(400).json({
         success: false,
         code: "INVALID_TOKEN",
         message: "Password reset link is invalid or has expired",
       });
     }
-
-    // Update password and clear reset fields
-    user.password = password;
-    user.passwordResetToken = undefined;
-    user.passwordResetExpires = undefined;
-    await user.save();
 
     res.json({
       success: true,
@@ -602,3 +598,14 @@ exports.resetPassword = async (req, res) => {
     });
   }
 };
+
+async function changePassword(filter, password) {
+  const hash = await bcryptjs.hash(password, 10);
+  if (filter.passwordResetExpires) filter.passwordResetExpires = { $gt: new Date() };
+  const result = await User.updateOne(filter, {
+    $set: { password: hash },
+    $unset: { passwordResetToken: "", passwordResetExpires: "" },
+    $inc: { sessionVersion: 1 },
+  });
+  return result.modifiedCount === 1;
+}
