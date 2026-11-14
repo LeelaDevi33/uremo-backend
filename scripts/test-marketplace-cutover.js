@@ -143,9 +143,17 @@ test("marketplace cutover preserves history and reports only settled project rev
     const Project = require("../src/models/Project"), Log = require("../src/models/AdminAuditLog");
     const p = await Project.create({ title:"Ordinary project", category:"design", status:"open", payRate:14 });
     const path = "/admin/workspace/project/" + p.id;
-    assert.equal((await request(path,"PUT",editor,{ payRate:34, priority:"urgent" })).status,200);
+    const first = (await (await request(path,"GET",editor)).json()).project;
+    assert.equal((await request(path,"PUT",editor,{ payRate:34 })).status,428);
+    const edits = await Promise.all(["urgent","high"].map(priority =>
+      request(path,"PUT",editor,{ expectedRevision:first.revision, payRate:34, priority })));
+    assert.deepEqual(edits.map(r => r.status).sort(),[200,409]);
+    const winner = (await edits.find(r => r.status === 200).json()).project;
+    assert.equal((await edits.find(r => r.status === 409).json()).code,"STALE_PROJECT");
+    assert.notEqual(winner.revision,first.revision);
     assert.ok(await Log.exists({ entityId:p.id, adminId:editor, action:"project_update", "previousState.payRate":14, "newState.payRate":34 }));
-    assert.equal((await request(path,"DELETE",editor)).status,200);
+    assert.equal((await request(path,"DELETE",editor,{ expectedRevision:first.revision })).status,409);
+    assert.equal((await request(path,"DELETE",editor,{ expectedRevision:winner.revision })).status,200);
     assert.ok(await Log.exists({ entityId:p.id, adminId:editor, action:"project_delete", "previousState.title":"Ordinary project" }));
   });
   await t.test("settled access reaches the buyer's profile, never another user's workspace or payroll", async () => {
@@ -170,7 +178,7 @@ test("marketplace cutover preserves history and reports only settled project rev
     assert.equal((await request(view,"GET",editor)).status,404);
     assert.equal((await request(view+"/start","POST",worker,{})).status,403);
     assert.equal((await request(view+"/rlhf-tasks")).status,403);
-    assert.equal((await request("/admin/workspace/project/"+project.id,"DELETE",editor)).status,409);
+    assert.equal((await request("/admin/workspace/project/"+project.id,"DELETE",editor,{ expectedRevision:project.updatedAt.toISOString() })).status,409);
     assert.ok(await Project.exists({ _id: project.id, assignedTo: null }), "Checkout does not create a staffing assignment");
     // Model an expired rental on another project; no handoff should be recoverable via the direct URL.
     const second = await Project.create({ title:"Voice cleanup",workPositionId:role._id,category:"other",status:"open",payRate:0 });

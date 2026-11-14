@@ -208,13 +208,18 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.equal((await req("/admin/workspace/projects", admin, "POST", { title: "Invalid", category: 8 })).status, 400);
     const alien = await makeRole();
     const projectApi = "/admin/workspace/project/";
+    const editProject = async (id, method, changes = {}) => {
+      const path = projectApi + id;
+      const { project } = await req(path, admin);
+      return req(path, admin, method, { expectedRevision: project.revision, ...changes });
+    };
     const roleApi = "/admin/workspace/job/" + role._id;
     const created = await req(roleApi + "/projects", admin, "POST", { title: "Research brief", payRate: 25, priority: "urgent" });
     assert.equal(created.status, 201, JSON.stringify(created));
     const project = created.project;
     assert.equal(project.category, "research");
     assert.equal(project.priority, "urgent");
-    assert.equal((await req(projectApi + project._id, admin, "PUT", { priority: "high" })).project.priority, "high");
+    assert.equal((await editProject(project._id, "PUT", { priority: "high" })).project.priority, "high");
     assert.equal((await req("/admin/workspace/job/" + alien._id + "/projects/" + project._id + "/activate", admin, "PUT", {})).status, 409);
     assert.equal((await req(roleApi + "/projects/" + project._id + "/activate", admin, "PUT", {})).status, 200);
     const newUser = async () => {
@@ -237,13 +242,13 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     assert.deepEqual(replies.map(r => r.status).sort(), [200,409]);
     const winner = workers[replies[0].status === 200 ? 0 : 1];
     const loser = workers[replies[0].status === 200 ? 1 : 0];
-    assert.equal((await req(projectApi + project._id, admin, "PUT", { status: "completed" })).status, 409);
+    assert.equal((await editProject(project._id, "PUT", { status: "completed" })).status, 409);
     const cancelled = (await req(roleApi + "/projects", admin, "POST", { title: "Cancelled assignment" })).project;
     assert.equal((await req(roleApi + "/projects/" + cancelled._id + "/activate", admin, "PUT", {})).status, 200);
     assert.equal((await req(projectApi + cancelled._id + "/assign", admin, "PUT", { workerId: loser._id })).status, 200);
-    assert.equal((await req(projectApi + cancelled._id, admin, "PUT", { status: "cancelled" })).status, 200);
+    assert.equal((await editProject(cancelled._id, "PUT", { status: "cancelled" })).status, 200);
     assert.equal((await ApplyWork.findById(loser._id)).currentProject, null);
-    assert.equal((await req(projectApi + cancelled._id, admin, "DELETE")).status, 409);
+    assert.equal((await editProject(cancelled._id, "DELETE")).status, 409);
     assert.equal((await req("/workspace/project/" + cancelled._id + "/submit", { _id: loser.user }, "POST", {})).status, 409);
     const Proof = require("../src/models/ProofOfWork");
     const proofId = new mongoose.Types.ObjectId();
@@ -256,7 +261,7 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     await Proof.collection.insertOne({ _id: validProof, projectId: new mongoose.Types.ObjectId(project._id), jobRoleId: role._id, workerId: winner.user, status: "pending",
       submissionText: "Isolated synthetic proof" });
     assert.equal((await req("/admin/proofs/" + validProof + "/approve", admin, "PUT", {})).status, 200);
-    assert.equal((await req(projectApi + project._id, admin, "PUT", { status: "open" })).status, 409);
+    assert.equal((await editProject(project._id, "PUT", { status: "open" })).status, 409);
     const failure = t.mock.method(Wallet, "create", async () => { throw Error("Synthetic earning ledger failure"); });
     const pay = () => req(projectApi + project._id + "/credit", admin, "PUT", { amount:25 });
     assert.equal((await pay()).status, 500);

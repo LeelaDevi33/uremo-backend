@@ -551,7 +551,7 @@ exports.getJobProjects = async (req, res) => {
       .lean();
 
     const access = await paidProjectAccess(null, projects.map(project => project._id));
-    res.json({ ok: true, projects: projects.map(project => ({ ...project, marketplaceReserved: access.get(String(project._id)).required })) });
+    res.json({ ok: true, projects: projects.map(project => ({ ...withRevision(project), marketplaceReserved: access.get(String(project._id)).required })) });
   } catch (err) {
     res.status(500).json({ ok: false, message: err.message });
   }

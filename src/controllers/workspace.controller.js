@@ -7,7 +7,7 @@
 const ApplyWork = require("../models/ApplyWork");
 const { createRoleApplication } = require("../services/opportunityApplications");
 const roleProjects = require("../services/roleProjects");
-const { roleError } = require("../services/adminWorkRoles");
+const { roleError, revision, withRevision } = require("../services/adminWorkRoles");
 const Screening = require("../models/Screening");
 const Project = require("../models/Project");
 const User = require("../models/User");
@@ -1480,7 +1480,7 @@ exports.adminGetProjects = async (req, res) => {
       .lean();
 
     const reserved = await paidProjectAccess(null, projects.map(p => p._id));
-    res.json({ projects: projects.map(p => ({ ...p, marketplaceReserved: reserved.get(String(p._id))?.required === true })) });
+    res.json({ projects: projects.map(p => ({ ...withRevision(p), marketplaceReserved: reserved.get(String(p._id))?.required === true })) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1647,7 +1647,7 @@ exports.adminGetProjectById = async (req, res) => {
 
     res.json({
       success: true,
-      project,
+      project: withRevision(project),
       workerProfile,
       proofs,
     });
@@ -1682,8 +1682,7 @@ exports.adminUpdateProject = async (req, res) => {
     } = req.body;
 
     const project = await Project.db.transaction(async session => {
-      const record = await Project.findById(req.params.id).session(session);
-      if (!record) throw roleError(404, "Project not found");
+      const record = await projectForEdit(req, session);
       if (category !== undefined && (typeof category !== "string" || !category.trim() || category.trim().length > 48)) {
         throw roleError(400, "A project category of 1 to 48 characters is required");
       }
@@ -1701,7 +1700,8 @@ exports.adminUpdateProject = async (req, res) => {
         deadline: deadline === "" ? null : deadline, status, priority, screeningId: screeningId === "" ? null : screeningId,
         screeningIds, projectType, datasetId: datasetId === "" ? null : datasetId, rewardPerTask };
       for (const [key, value] of Object.entries(changes)) if (value !== undefined) record.set(key, value);
-      await record.save({ session });
+      record.updatedAt = new Date(Math.max(Date.now(), Date.parse(revision(record)) + 1));
+      await record.save({ session, timestamps: false });
       await require("../services/adminAudit.service").logAdminAction({
         adminId: req.user.id, adminEmail: req.user.email, action: "project_update", entityType: "project",
         entityId: String(record._id), previousState,
@@ -1714,10 +1714,10 @@ exports.adminUpdateProject = async (req, res) => {
     res.json({
       success: true,
       message: "Project updated successfully",
-      project,
+      project: withRevision(project),
     });
   } catch (err) {
-    res.status(err.status || (err.name === "ValidationError" ? 400 : 500)).json({ message: err.message });
+    res.status(err.status || (err.name === "ValidationError" ? 400 : 500)).json({ message: err.message, code: err.code });
   }
 };
 
@@ -1727,27 +1727,11 @@ exports.adminUpdateProject = async (req, res) => {
  */
 exports.adminDeleteProject = async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
-
-    // GUARDRAIL: Cannot delete assigned or completed projects
-    if (project.status === "assigned" || project.status === "in_progress") {
-      return res.status(400).json({
-        message: "Cannot delete an active project",
-        hint: "Unassign the worker first or mark as cancelled",
-      });
-    }
-
-    if (project.status === "completed") {
-      return res.status(400).json({
-        message: "Cannot delete a completed project",
-        hint: "Completed projects are kept for records",
-      });
-    }
-
     await Project.db.transaction(async session => {
+      const project = await projectForEdit(req, session);
+      if (["assigned", "in_progress", "completed"].includes(project.status)) {
+        throw roleError(400, "Assigned and completed projects are kept for history");
+      }
       const access = (await paidProjectAccess(null, [project._id], { session })).get(String(project._id));
       if (access?.required) throw roleError(409, "A project linked to a marketplace offer must be kept for its access records.");
       const removed = await Project.findOneAndDelete({ _id: req.params.id, status: { $in: ["draft", "open", "cancelled"] }, assignedTo: null }, { session });
@@ -1762,9 +1746,20 @@ exports.adminDeleteProject = async (req, res) => {
       message: "Project deleted successfully",
     });
   } catch (err) {
-    res.status(err.status || 500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message, code: err.code });
   }
 };
+
+async function projectForEdit(req, session) {
+  if (!Project.base.isObjectIdOrHexString(req.params.id)) throw roleError(400, "Invalid project ID");
+  const project = await Project.findById(req.params.id).session(session);
+  if (!project) throw roleError(404, "Project not found");
+  const expected = req.body?.expectedRevision;
+  if (expected !== revision(project)) {
+    throw Object.assign(roleError(expected === undefined ? 428 : 409, "Reload this project before saving or deleting it."), { code: "STALE_PROJECT" });
+  }
+  return project;
+}
 
 /**
  * PATCH_86: GET /api/admin/workspace/project/:id/eligible-workers

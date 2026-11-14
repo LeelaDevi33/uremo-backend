@@ -7,9 +7,9 @@ const Service = require("../models/Service");
 const ProofOfWork = require("../models/ProofOfWork");
 
 function roleError(status, message) { return Object.assign(new Error(message), { status }); }
-function revision(role) { return (role.updatedAt || role.createdAt || role._id.getTimestamp()).toISOString(); }
-function withRevision(role) {
-  return { ...(role.toObject ? role.toObject() : role), revision: revision(role) };
+function revision(record) { return (record.updatedAt || record.createdAt || record._id.getTimestamp()).toISOString(); }
+function withRevision(record) {
+  return { ...(record.toObject ? record.toObject() : record), revision: revision(record) };
 }
 async function readRole(id, expectedRevision, session) {
   if (!mongoose.isObjectIdOrHexString(id)) throw roleError(400, "Invalid work role ID");
@@ -66,4 +66,4 @@ async function reviewApplication(id, status, { roleId, adminId, reason } = {}) {
     return { applicant, job, changed: true };
   });
 }
-module.exports = { roleError, withRevision, editRole, removeRole, reviewApplication };
+module.exports = { roleError, revision, withRevision, editRole, removeRole, reviewApplication };
