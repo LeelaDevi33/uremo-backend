@@ -24,14 +24,54 @@ function cents(value) {
   return Number.isSafeInteger(rounded) && Math.abs(value - rounded / 100) <= 1e-8 ? rounded : null;
 }
 
+// Legacy orders also use service_purchase and rental_purchase. Only match those ledger
+// entries by receipt ID; an explicit marketplace description also identifies an orphan.
+async function inspectAccessReceipts(db, seen, issues) {
+  const receipts = new Map();
+  const grants = db.collection("opportunitygrants").find({}, { projection: {
+    userId: 1, type: 1, currency: 1, amount: 1, refundedAt: 1, refundTransactionId: 1,
+  } });
+  for await (const grant of grants) {
+    seen.accessReceipts++;
+    receipts.set(String(grant._id), { grant, debits: 0, refunds: 0, valid: true });
+  }
+  const ledger = db.collection("wallettransactions").find({
+    status: "success", source: { $in: ["rental_purchase", "service_purchase", "refund"] },
+  }, { projection: { user: 1, type: 1, source: 1, amount: 1, referenceId: 1, description: 1, withdrawablePortion: 1 } });
+  for await (const entry of ledger) {
+    const row = receipts.get(String(entry.referenceId));
+    if (!row) {
+      if (/^(Opportunity rental|Exclusive opportunity purchase|Project access refund): /.test(entry.description || "")) issues.orphanAccessTransactions++;
+      continue;
+    }
+    const refund = entry.source === "refund";
+    if (refund) row.refunds++; else row.debits++;
+    const amount = cents(entry.amount);
+    const portion = entry.withdrawablePortion == null ? null : cents(entry.withdrawablePortion);
+    if (refund) row.refundPortion = portion; else row.debitPortion = portion;
+    const expectedSource = row.grant.type === "rent" ? "rental_purchase" : "service_purchase";
+    if (amount == null || amount <= 0 || cents(row.grant.amount) !== amount || row.grant.currency !== "USD" ||
+        String(entry.user) !== String(row.grant.userId) || entry.type !== (refund ? "credit" : "debit") ||
+        (refund ? String(entry._id) !== String(row.grant.refundTransactionId) : entry.source !== expectedSource) ||
+        (entry.withdrawablePortion != null && (portion == null || portion < 0 || portion > amount))) row.valid = false;
+  }
+  for (const row of receipts.values()) {
+    if (row.debits !== 1) issues.accessReceiptDebitCount++;
+    if (row.refunds !== (row.grant.refundedAt ? 1 : 0) || Boolean(row.grant.refundedAt) !== Boolean(row.grant.refundTransactionId)) issues.accessReceiptRefundCount++;
+    if (!row.valid || !["buy", "rent"].includes(row.grant.type) ||
+        (row.refunds === 1 && (row.debitPortion ?? 0) !== (row.refundPortion ?? 0))) issues.accessReceiptLedgerMismatch++;
+  }
+}
+
 async function inspect(db) {
   const collections = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map(c => c.name));
   const missingCollections = required.filter(name => !collections.has(name));
-  const seen = { wallets: 0, openWithdrawals: 0, creditedProjects: 0 };
+  const seen = { wallets: 0, openWithdrawals: 0, creditedProjects: 0, accessReceipts: 0 };
   const issues = {
     invalidWalletAmounts: 0, negativeWalletAmounts: 0, reservedExceedsTotal: 0, withdrawableExceedsSpendable: 0,
     reservationTotalsMismatch: 0, invalidOpenWithdrawalAmounts: 0, orphanOpenWithdrawals: 0,
     invalidProjectCredits: 0, creditedProjectsWithoutLedger: 0, creditedProjectsWithDuplicateLedger: 0, projectLedgerMismatch: 0,
+    accessReceiptDebitCount: 0, accessReceiptRefundCount: 0, accessReceiptLedgerMismatch: 0, orphanAccessTransactions: 0,
   };
   const byUser = new Map();
   const open = db.collection("withdrawalrequests").find({ status: { $in: ["pending", "approved"] } },
@@ -89,6 +129,8 @@ async function inspect(db) {
     if (project.count > 1) issues.creditedProjectsWithDuplicateLedger++;
     if (!project.matches) issues.projectLedgerMismatch++;
   }
+  if (collections.has("opportunities") && !collections.has("opportunitygrants")) missingCollections.push("opportunitygrants");
+  await inspectAccessReceipts(db, seen, issues);
   const clean = !missingCollections.length && Object.values(issues).every(n => n === 0);
   return { result: clean ? "pass" : "review", missingCollections, scanned: seen, findings: issues };
 }

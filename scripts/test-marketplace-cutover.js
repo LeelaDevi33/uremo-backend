@@ -126,6 +126,17 @@ test("marketplace cutover preserves history and reports only settled project rev
     assert.equal(second.nextCursor, null);
     assert.equal(new Set([...page.receipts, ...second.receipts].map(row => row._id)).size, 28);
     assert.equal((await request("/admin/marketplace-receipts?before=invalid", "GET", editor)).status, 400);
+    const lookup = "/admin/marketplace-receipts?receiptId=" + second.receipts[0]._id;
+    const exact = await request(lookup, "GET", editor);
+    assert.equal(exact.status, 200);
+    assert.match(exact.headers.get("cache-control"), /no-store/);
+    assert.deepEqual(await exact.json(), { receipts: [second.receipts[0]], nextCursor: null });
+    assert.equal((await request(lookup, "GET", null)).status, 401);
+    assert.equal((await request(lookup, "GET", worker)).status, 403);
+    assert.deepEqual(await (await request(lookup + "&type=buy", "GET", editor)).json(), { receipts: [], nextCursor: null });
+    for (const query of ["receiptId=bad", "receiptId=", "receiptId=" + page.nextCursor + "&before=" + page.nextCursor]) {
+      assert.equal((await request("/admin/marketplace-receipts?" + query, "GET", editor)).status, 400);
+    }
   });
   await t.test("both former gateway editors can disable an existing method but cannot create or reopen one", async () => {
     const Method = require("../src/models/PaymentMethod");
@@ -185,5 +196,11 @@ test("marketplace cutover preserves history and reports only settled project rev
     const other = await Opportunity.create({ projectId:second._id,projectRoleId:role._id });
     await Grant.collection.insertOne({ userId:worker,projectId:second._id,opportunityId:other._id,requestId:randomUUID(),type:"rent",startsAt:new Date(1),endsAt:new Date(2),deliverable:"Expired private data" });
     assert.equal((await request("/workspace/project/"+second.id)).status,404);
+    // A legacy worker assignment for an offer must not disclose its project brief through the profile.
+    await require("../src/models/ApplyWork").create({ user: worker, position: role._id, status: "approved", workerStatus: "working" });
+    await Project.updateOne({ _id: second._id }, { status: "assigned", assignedTo: worker, description: "Legacy private project data" });
+    const profile = await (await request("/workspace/profile")).json();
+    assert.ok(profile.hasProfile);
+    assert.ok(!JSON.stringify(profile).includes("Legacy private project data"));
   });
 });

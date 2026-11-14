@@ -49,13 +49,16 @@ exports.overview = async (_req, res, next) => {
 
 exports.receipts = async (req, res, next) => {
   try {
-    const { type, before } = req.query;
-    if ((type && !["rent", "buy"].includes(type)) || (before && (typeof before !== "string" || !/^[a-f\d]{24}$/i.test(before)))) {
+    const { type, before, receiptId } = req.query;
+    const validId = value => typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
+    if ((type && !["rent", "buy"].includes(type)) || (before !== undefined && !validId(before)) ||
+        (receiptId !== undefined && !validId(receiptId)) || (receiptId && before)) {
       return res.status(400).json({ message: "Invalid receipt filter or cursor" });
     }
     const filter = {};
     if (type) filter.type = type;
     if (before) filter._id = { $lt: before };
+    if (receiptId) filter._id = receiptId;
     const rows = await Grant.find(filter)
       .select("title userId type amount currency startsAt endsAt refundedAt refundTransactionId +refundReason +refundedBy")
       .populate("userId", "name")

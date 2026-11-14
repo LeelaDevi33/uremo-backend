@@ -40,6 +40,8 @@ Open **Admin → Project offers**, choose Lumiere, then edit the public brief, c
 
 For a reviewed refund, open **Project offers → Access receipts**, choose the receipt and record the reason. Confirmation credits the member's wallet once, preserves the original debit and receipt, revokes the grant and archives the listing for review. Confirm both the wallet entry and the listing status after issuing a refund.
 
+Members can find their receipt ID in **Profile → My project access**. Admins can look up that exact ID in **Access receipts** before issuing a refund. When a purchase used earnings, the refund restores the recorded earnings portion to the withdrawable balance. Receipts from before funding portions were recorded retain their original wallet-credit treatment.
+
 ## Start a fresh local replica
 
 These commands are for a fresh development database. In PowerShell, with MongoDB Server installed, run:
@@ -108,6 +110,8 @@ node scripts/verify-marketplace-indexes.js --db RESTORED_DB --port 27347
 node scripts/reconcile-wallets.js --db RESTORED_DB --port 27347
 node scripts/review-project-offers.js --db RESTORED_DB --port 27347
 ```
+
+The wallet audit matches each paid access receipt to its original debit. For a refunded receipt it also checks the linked refund, amount, holder and recorded earnings portion. It reports mismatches as aggregate counts.
 
 ## Host an isolated staging release
 

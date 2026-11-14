@@ -59,11 +59,53 @@ test("read-only reconciliation differentiates healthy, inconsistent and incomple
     invalidWalletAmounts: 1, negativeWalletAmounts: 1, reservedExceedsTotal: 2, withdrawableExceedsSpendable: 1,
     reservationTotalsMismatch: 1, invalidOpenWithdrawalAmounts: 1, orphanOpenWithdrawals: 1, invalidProjectCredits: 1,
     creditedProjectsWithoutLedger: 1, creditedProjectsWithDuplicateLedger: 1, projectLedgerMismatch: 1,
+    accessReceiptDebitCount: 0, accessReceiptRefundCount: 0, accessReceiptLedgerMismatch: 0, orphanAccessTransactions: 0,
   });
   const failed = execCli(name);
   assert.equal(failed.status, 2);
   assert.deepEqual(JSON.parse(failed.stdout), problem);
   assert.doesNotMatch(failed.stdout + failed.stderr, /private@example|[a-f0-9]{24}/);
+
+  const grants = db.collection("opportunitygrants");
+  const transactions = db.collection("wallettransactions");
+  const sale = new ObjectId(), rental = new ObjectId(), refundId = new ObjectId();
+  const receipt = { userId: user, currency: "USD", amount: 12.25 };
+  const debit = { user, amount: 12.25, source: "service_purchase", status: "success", type: "debit" };
+  await grants.insertMany([
+    { ...receipt, _id: sale, type: "buy", refundedAt: new Date(), refundTransactionId: refundId },
+    { ...receipt, _id: rental, type: "rent" },
+  ]);
+  await transactions.insertMany([
+    { ...debit, referenceId: sale, withdrawablePortion: 5.25 },
+    { ...debit, referenceId: sale, _id: refundId, type: "credit", source: "refund", withdrawablePortion: 5.25 },
+    { ...debit, referenceId: rental, source: "rental_purchase" },
+    { ...debit, referenceId: new ObjectId(), description: "Legacy service" },
+  ]);
+  const healthyReceipts = await auditedRead();
+  assert.equal(healthyReceipts.scanned.accessReceipts, 2);
+  assert.deepEqual(healthyReceipts.findings, problem.findings);
+
+  await transactions.updateOne({ _id: refundId }, { $set: { withdrawablePortion: 2.25 } });
+  assert.equal((await auditedRead()).findings.accessReceiptLedgerMismatch, 1);
+  await transactions.updateOne({ _id: refundId }, { $set: { withdrawablePortion: 5.25, amount: 3 } });
+  assert.equal((await auditedRead()).findings.accessReceiptLedgerMismatch, 1);
+  await transactions.updateOne({ _id: refundId }, { $set: { amount: 12.25, user: new ObjectId() } });
+  assert.equal((await auditedRead()).findings.accessReceiptLedgerMismatch, 1);
+  await transactions.updateOne({ _id: refundId }, { $set: { user } });
+  await grants.updateOne({ _id: sale }, { $set: { refundTransactionId: new ObjectId() } });
+  assert.equal((await auditedRead()).findings.accessReceiptLedgerMismatch, 1);
+  await grants.updateOne({ _id: sale }, { $set: { refundTransactionId: refundId } });
+  await transactions.deleteOne({ _id: refundId });
+  await transactions.insertOne({ ...debit, referenceId: sale, withdrawablePortion: 5.25 });
+  await transactions.deleteOne({ referenceId: rental });
+  await transactions.insertOne({ ...debit, referenceId: new ObjectId(), description: "Exclusive opportunity purchase: Example" });
+  const corruptReceipts = await auditedRead();
+  assert.equal(corruptReceipts.findings.accessReceiptDebitCount, 2);
+  assert.equal(corruptReceipts.findings.accessReceiptRefundCount, 1);
+  assert.equal(corruptReceipts.findings.orphanAccessTransactions, 1);
+  await db.createCollection("opportunities");
+  await grants.drop();
+  assert.deepEqual((await auditedRead()).missingCollections, ["opportunitygrants"]);
   const emptyName = name + "_empty";
   const empty = execCli(emptyName);
   assert.equal(empty.status, 2);
