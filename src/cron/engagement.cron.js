@@ -1,5 +1,6 @@
 const User = require("../models/User");
 const engagementService = require("../services/engagement.service");
+const { getFrontendUrl } = require("../config/frontendUrl");
 
 let emailService;
 try {
@@ -130,7 +131,7 @@ const sendEngagementEmail = async (user, event) => {
       <h2>${escapedTitle}</h2>
       <p>${escapedMessage}</p>
       <p>
-        <a href="https://uremo.online" style="background: #6366f1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block;">
+        <a href="${getFrontendUrl()}" style="background: #6366f1; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block;">
           View on UREMO
         </a>
       </p>
@@ -138,7 +139,7 @@ const sendEngagementEmail = async (user, event) => {
         You received this because you're interested in: ${sanitizedTags || "general updates"}
       </p>
       <p style="color: #999; font-size: 11px; margin-top: 20px;">
-        <a href="https://uremo.online/profile">Manage preferences</a>
+        <a href="${getFrontendUrl()}/profile">Manage preferences</a>
       </p>
     `;
 

@@ -1,3 +1,5 @@
+const { getFrontendUrl } = require("../config/frontendUrl");
+
 function escapeHtml(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -11,13 +13,6 @@ function humanizeCategory(category) {
   const c = String(category || "").trim();
   if (!c) return "General";
   return c.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
-function getFrontendUrl() {
-  return String(process.env.FRONTEND_URL || "https://uremo.online").replace(
-    /\/$/,
-    "",
-  );
 }
 
 function baseLayout({ title, preheader, bodyHtml }) {
@@ -97,8 +92,8 @@ function welcomeEmail(recipient) {
     preheader: "Find a project or apply for an open role.",
     bodyHtml: `
       <h1>Welcome to UREMO</h1>
-      <p>Hi ${escapeHtml(name || "there")}, your account is ready. Browse open roles and projects. Each listing shows whether you can apply, rent for a fixed term or buy exclusive access.</p>
-      ${primaryButton({ href: `${getFrontendUrl()}/explore-services`, label: "Explore opportunities" })}
+      <p>Hi ${escapeHtml(name || "there")}, your account is ready. Apply to a specialization for free to qualify for matching rentals. Full Access purchases are available to any member.</p>
+      ${primaryButton({ href: `${getFrontendUrl()}/open-roles`, label: "Browse open roles" })}
     `,
   });
 }
@@ -425,6 +420,7 @@ function adminApplicationAlertEmail({ userEmail, category }) {
 }
 
 module.exports = {
+  escapeHtml,
   // New pack API
   welcomeEmail,
   paymentPendingReminder,
