@@ -1,6 +1,8 @@
 const Notification = require("../models/Notification");
 const User = require("../models/User");
 const { sendEmail } = require("./email.service");
+const { escapeHtml } = require("../emails/templates");
+const { getFrontendUrl } = require("../config/frontendUrl");
 
 /**
  * Send a notification to a user (in-app + email)
@@ -45,13 +47,13 @@ async function sendNotification({
             subject: `[UREMO] ${title}`,
             html: `
               <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <h2 style="color: #10B981;">${title}</h2>
-                <p style="color: #374151; font-size: 16px;">${message}</p>
+                <h2 style="color: #10B981;">${escapeHtml(title)}</h2>
+                <p style="color: #374151; font-size: 16px;">${escapeHtml(message)}</p>
                 <hr style="border: 1px solid #E5E7EB; margin: 20px 0;" />
                 <p style="color: #9CA3AF; font-size: 12px;">
                   This is an automated notification from UREMO.
                   <br />
-                  <a href="${process.env.FRONTEND_URL || "https://uremo.com"}" style="color: #10B981;">
+                  <a href="${getFrontendUrl()}" style="color: #10B981;">
                     Visit Dashboard
                   </a>
                 </p>

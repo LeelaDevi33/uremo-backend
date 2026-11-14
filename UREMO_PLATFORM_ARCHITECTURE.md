@@ -1,5 +1,7 @@
 # UREMO Platform Architecture
 
+This is the June 2025 architecture record. The current marketplace separates free specialization applications from individual project rentals and exclusive purchases. See [the current marketplace workflow and release checks](LOCAL_DEVELOPMENT.md#check-the-admin-and-worker-views-before-releasing).
+
 > **Version:** 1.0  
 > **Last Updated:** June 2025  
 > **Status:** Production Ready (Post-PATCH_27)
@@ -84,7 +86,7 @@ UREMO is a full-stack service marketplace platform that connects service provide
 │  │   FRONTEND       │          │         BACKEND               ││
 │  │   (Next.js)      │──HTTPS──▶│         (Express.js)          ││
 │  │                  │          │                               ││
-│  │  uremo.online    │          │  uremo-backend.onrender.com   ││
+│  │  Vercel alias    │          │  uremo-backend.onrender.com   ││
 │  └──────────────────┘          └──────────────────────────────┘│
 │                                          │                      │
 │                                          ▼                      │
@@ -427,7 +429,8 @@ if (user.role !== "admin")
 
 ```javascript
 const io = require("socket.io")(server, {
-  cors: { origin: ["https://uremo.online", "http://localhost:3000"] },
+  cors: { origin: checkCorsOrigin, credentials: true },
+  allowRequest: (req, done) => done(null, isAllowedOrigin(req.headers.origin)),
 });
 
 io.use(socketAuthMiddleware);
@@ -582,7 +585,7 @@ router.post(
 ```javascript
 app.use(
   cors({
-    origin: ["https://uremo.online", "http://localhost:3000"],
+    origin: checkCorsOrigin, // Shared with Socket.IO in src/config/browserOrigins.js
     credentials: true,
   }),
 );
@@ -608,7 +611,7 @@ if (!result) return res.status(400).json({ error: "Insufficient balance" });
 
 | Service  | URL                                |
 | -------- | ---------------------------------- |
-| Frontend | https://uremo.online               |
+| Frontend | https://uremo-frontend.vercel.app  |
 | Backend  | https://uremo-backend.onrender.com |
 | Database | MongoDB Atlas                      |
 
@@ -618,14 +621,16 @@ if (!result) return res.status(400).json({ error: "Insufficient balance" });
 
 ```
 PORT=5000
-MONGODB_URI=mongodb+srv://...
+MONGO_URI=mongodb+srv://...
 JWT_SECRET=<secure-random-string>
 CLOUDINARY_NAME=<account>
 CLOUDINARY_API_KEY=<key>
 CLOUDINARY_API_SECRET=<secret>
 STRIPE_SECRET_KEY=<key>
 RESEND_API_KEY=<key>
-FRONTEND_URL=https://uremo.online
+FRONTEND_URL=https://uremo-frontend.vercel.app
+# Optional comma-separated list of additional exact frontend origins, e.g. a staging URL.
+CORS_ALLOWED_ORIGINS=
 ```
 
 **Frontend (.env.local):**

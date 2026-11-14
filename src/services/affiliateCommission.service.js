@@ -69,7 +69,8 @@ exports.processAffiliateCommission = async (
     }
 
     // Calculate order amount from service price
-    const orderAmount = order.serviceId?.price || 0;
+    if (order.settledCurrency && order.settledCurrency !== "USD") return null;
+    const orderAmount = order.settledAmount ?? order.quotedAmount ?? order.serviceId?.price ?? 0;
     if (orderAmount <= 0) {
       console.log(`[AffiliateCommission] Invalid order amount: ${orderAmount}`);
       return null;

@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: uremo-backend-staging
+    runtime: node
+    region: singapore
+    plan: free
+    branch: codex/opportunity-marketplace
+    autoDeployTrigger: 'off'
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health/ready
+    envVars:
+      - key: NODE_VERSION
+        value: '24'
+      - key: NODE_ENV
+        value: production
+      - key: UREMO_ENVIRONMENT
+        value: staging
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGO_URI
+        sync: false
+      - key: FRONTEND_URL
+        sync: false

@@ -1,8 +1,7 @@
 const express = require("express");
+const retiredCatalog = require("../middlewares/retiredCatalog");
 const auth = require("../middlewares/auth.middleware");
 const {
-  createOrder,
-  createDealOrder,
   myOrders,
   getOrderById,
   submitPayment,
@@ -15,11 +14,11 @@ const {
 
 const router = express.Router();
 
-router.post("/", auth, createOrder);
+router.post("/", auth, retiredCatalog);
 router.get("/", auth, myOrders); // Alias for /my
 router.get("/my", auth, myOrders);
 // PATCH_38: Deal order creation
-router.post("/deal", auth, createDealOrder);
+router.post("/deal", auth, retiredCatalog);
 router.get("/:id/messages", auth, getOrderMessages);
 router.post("/:id/messages", auth, postOrderMessage);
 router.get("/:id/messages/stream", auth, streamOrderMessages);

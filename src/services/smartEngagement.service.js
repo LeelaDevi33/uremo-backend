@@ -13,8 +13,13 @@
 const User = require("../models/User");
 const ApplyWork = require("../models/ApplyWork");
 const Order = require("../models/Order");
+const Project = require("../models/Project");
+const Grant = require("../models/OpportunityGrant");
+const { meetsScreenings } = require("./roleProjects");
+const { escapeHtml } = require("../emails/templates");
 const Notification = require("../models/Notification");
 const { sendEmail } = require("./email.service");
+const { getFrontendUrl } = require("../config/frontendUrl");
 
 const logger = {
   info: (msg) => console.log(`[ENGAGEMENT] ${new Date().toISOString()} ${msg}`),
@@ -83,10 +88,10 @@ const createNotification = async (userId, title, message, type = "system") => {
  */
 const sendEngagementEmail = async (user, subject, message, ctaText, ctaUrl) => {
   try {
-    const frontendUrl = process.env.FRONTEND_URL || "https://uremo.online";
-    const fullCtaUrl = ctaUrl.startsWith("http")
-      ? ctaUrl
-      : `${frontendUrl}${ctaUrl}`;
+    const frontendUrl = getFrontendUrl();
+    const cta = new URL(ctaUrl, frontendUrl);
+    if (cta.origin !== frontendUrl) throw new Error("Engagement link must open the configured site");
+    const fullCtaUrl = cta.href;
 
     await sendEmail({
       to: user.email,
@@ -97,19 +102,19 @@ const sendEngagementEmail = async (user, subject, message, ctaText, ctaUrl) => {
             <h1 style="color: #10b981; font-size: 24px; margin: 0;">UREMO</h1>
           </div>
           
-          <h2 style="color: #f8fafc; font-size: 20px; margin-bottom: 16px;">${subject}</h2>
+          <h2 style="color: #f8fafc; font-size: 20px; margin-bottom: 16px;">${escapeHtml(subject)}</h2>
           
           <p style="color: #94a3b8; font-size: 16px; line-height: 1.6; margin-bottom: 24px;">
-            Hi ${user.name?.split(" ")[0] || "there"},
+            Hi ${escapeHtml(user.name?.split(" ")[0] || "there")},
           </p>
           
           <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6; margin-bottom: 32px;">
-            ${message}
+            ${escapeHtml(message)}
           </p>
           
           <div style="text-align: center; margin-bottom: 32px;">
-            <a href="${fullCtaUrl}" style="display: inline-block; background: linear-gradient(135deg, #10b981, #059669); color: white; text-decoration: none; padding: 14px 32px; border-radius: 12px; font-weight: 600; font-size: 16px;">
-              ${ctaText}
+            <a href="${escapeHtml(fullCtaUrl)}" style="display: inline-block; background: linear-gradient(135deg, #10b981, #059669); color: white; text-decoration: none; padding: 14px 32px; border-radius: 12px; font-weight: 600; font-size: 16px;">
+              ${escapeHtml(ctaText)}
             </a>
           </div>
           
@@ -169,12 +174,13 @@ const processSignupNudge = async () => {
 
     for (const user of users) {
       // Check if user has any meaningful activity
-      const [ordersCount, applicationsCount] = await Promise.all([
-        Order.countDocuments({ user: user._id }),
-        ApplyWork.countDocuments({ user: user._id }),
+      const [order, application, receipt] = await Promise.all([
+        Order.exists({ userId: user._id }),
+        ApplyWork.exists({ user: user._id }),
+        Grant.exists({ userId: user._id }),
       ]);
 
-      if (ordersCount > 0 || applicationsCount > 0) {
+      if (order || application || receipt) {
         // User is active, mark nudge as sent (no need to send)
         await User.findByIdAndUpdate(user._id, {
           "engagementNudges.signupNudgeSent": true,
@@ -187,21 +193,21 @@ const processSignupNudge = async () => {
       await createNotification(
         user._id,
         "Need help getting started? 🚀",
-        "Welcome to UREMO! Explore services you can buy, or apply to work and start earning. We're here to help you succeed.",
+        "Browse open roles and apply for a specialization that fits your skills.",
         "system",
       );
       notified++;
 
       // Send email ONLY if user hasn't logged in recently
       if (!isUserActive(user) && canSendEngagementEmail(user)) {
-        await sendEngagementEmail(
+        const sent = await sendEngagementEmail(
           user,
           "Need help getting started on UREMO?",
-          "We noticed you haven't explored UREMO yet. Whether you want to buy professional services or earn money by working on tasks — we've got you covered.",
-          "Explore UREMO",
-          "/dashboard",
+          "Apply to open roles for free. Approved workers can rent matching projects, and any member can browse Full Access projects.",
+          "Browse open roles",
+          "/open-roles",
         );
-        emailed++;
+        if (sent) emailed++;
       }
 
       // Mark nudge as sent
@@ -299,45 +305,51 @@ const processScreeningNudge = async () => {
  * RULE 3: Screening Passed → No Project
  * Called when new project/job is created
  */
-const notifyReadyWorkers = async (jobTitle, jobCategory, jobId) => {
+const notifyReadyWorkers = async (_jobTitle, _jobCategory, jobId) => {
   try {
-    // Find workers who are ready but have no assigned projects
+    if (!Project.base.isObjectIdOrHexString(jobId)) throw Object.assign(new Error("Select a project to notify workers"), { status: 400 });
+    const project = await Project.findOne({ _id: jobId, status: "open", assignedTo: null })
+      .select("title category workPositionId screeningId screeningIds").populate("workPositionId", "active hasScreening screeningId screeningIds").lean();
+    if (!project?.workPositionId?.active) return { notified: 0, emailed: 0 };
+    const jobTitle = project.title;
     const readyWorkers = await ApplyWork.find({
-      workerStatus: "ready_to_work",
-    }).populate(
+      position: project.workPositionId._id, status: "approved", workerStatus: "ready_to_work", currentProject: null,
+    }).select("user screeningsCompleted").populate(
       "user",
       "name email emailPreferences engagementNudges lastEngagementEmail",
     );
 
     let notified = 0;
     let emailed = 0;
+    const recipients = new Set();
 
     for (const application of readyWorkers) {
       const user = application.user;
-      if (!user) continue;
+      if (!user || recipients.has(String(user._id)) || !meetsScreenings(application, project, project.workPositionId)) continue;
 
       // Check if user's job alerts are enabled
       if (!user.emailPreferences?.jobAlerts) continue;
+      recipients.add(String(user._id));
 
       // Send in-app notification
-      await createNotification(
+      const notification = await createNotification(
         user._id,
         "New work opportunity! 💼",
-        `A new "${jobTitle}" position is available. Check it out and start earning.`,
+        `A new project, "${jobTitle}", matches your specialization. Assigned projects appear in your workspace.`,
         "workspace",
       );
-      notified++;
+      if (notification) notified++;
 
       // Send email if allowed
       if (canSendEngagementEmail(user)) {
-        await sendEngagementEmail(
+        const sent = await sendEngagementEmail(
           user,
           "New work opportunity available",
-          `We have a new "${jobTitle}" position that matches your skills. This could be a great opportunity for you to start earning.`,
+          `A new project, "${jobTitle}", matches your specialization. Your workspace shows projects assigned to you.`,
           "View Projects",
           "/workspace",
         );
-        emailed++;
+        if (sent) emailed++;
       }
     }
 

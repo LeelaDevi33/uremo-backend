@@ -12,7 +12,6 @@ const {
   processSignupNudge,
   processScreeningNudge,
   notifyReadyWorkers,
-  notifyInterestedUsers,
 } = require("../services/smartEngagement.service");
 
 /**
@@ -89,10 +88,10 @@ router.post("/notify-ready-workers", auth, adminAuth, async (req, res) => {
   try {
     const { jobTitle, jobCategory, jobId } = req.body;
 
-    if (!jobTitle) {
+    if (!jobId) {
       return res.status(400).json({
         success: false,
-        message: "jobTitle is required",
+        message: "Select a project to notify workers",
       });
     }
 
@@ -104,7 +103,7 @@ router.post("/notify-ready-workers", auth, adminAuth, async (req, res) => {
     });
   } catch (error) {
     console.error("[engagement] notify-ready-workers failed:", error.message);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: "Failed to notify ready workers",
       error: error.message,
@@ -116,39 +115,7 @@ router.post("/notify-ready-workers", auth, adminAuth, async (req, res) => {
  * POST /api/engagement/notify-interested-users
  * Notify users interested in a new service (internal/webhook use)
  */
-router.post("/notify-interested-users", auth, adminAuth, async (req, res) => {
-  try {
-    const { serviceTitle, serviceCategory, serviceId } = req.body;
-
-    if (!serviceTitle) {
-      return res.status(400).json({
-        success: false,
-        message: "serviceTitle is required",
-      });
-    }
-
-    const results = await notifyInterestedUsers(
-      serviceTitle,
-      serviceCategory,
-      serviceId,
-    );
-    res.json({
-      success: true,
-      message: "Interested users notified",
-      results,
-    });
-  } catch (error) {
-    console.error(
-      "[engagement] notify-interested-users failed:",
-      error.message,
-    );
-    res.status(500).json({
-      success: false,
-      message: "Failed to notify interested users",
-      error: error.message,
-    });
-  }
-});
+router.post("/notify-interested-users", auth, adminAuth, require("../middlewares/retiredCatalog"));
 
 /**
  * GET /api/engagement/status

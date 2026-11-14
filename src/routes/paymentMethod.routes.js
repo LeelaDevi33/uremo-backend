@@ -1,19 +1,15 @@
 const express = require("express");
 const auth = require("../middlewares/auth.middleware");
 const admin = require("../middlewares/admin.middleware");
-const {
-  getAll,
-  getActive,
-  create,
-  update,
-} = require("../controllers/paymentMethod.controller");
+const { getActive } = require("../controllers/paymentMethod.controller");
+const { getPaymentMethodsAdmin, retiredGateway, updatePaymentMethod } = require("../controllers/admin.payment.controller");
 
 const router = express.Router();
 
 // Admin routes
-router.get("/admin", auth, admin, getAll);
-router.post("/admin", auth, admin, create);
-router.put("/admin/:id", auth, admin, update);
+router.get("/admin", auth, admin, getPaymentMethodsAdmin);
+router.post("/admin", auth, admin, retiredGateway);
+router.put("/admin/:id", auth, admin, updatePaymentMethod);
 
 // Public route
 router.get("/", getActive);

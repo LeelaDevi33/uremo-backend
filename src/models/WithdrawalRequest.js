@@ -25,6 +25,7 @@ const withdrawalRequestSchema = new mongoose.Schema(
       required: true,
       min: 10, // Minimum withdrawal $10
     },
+    requestId: { type: String, maxlength: 100 },
     status: {
       type: String,
       enum: ["pending", "approved", "rejected", "paid"],
@@ -65,5 +66,6 @@ const withdrawalRequestSchema = new mongoose.Schema(
 
 // Index for admin queries
 withdrawalRequestSchema.index({ status: 1, createdAt: -1 });
+withdrawalRequestSchema.index({ userId: 1, requestId: 1 }, { unique: true, partialFilterExpression: { requestId: { $type: "string" } } });
 
 module.exports = mongoose.model("WithdrawalRequest", withdrawalRequestSchema);

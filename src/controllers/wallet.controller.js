@@ -9,7 +9,10 @@
  */
 const User = require("../models/User");
 const WalletTransaction = require("../models/WalletTransaction");
+const { paymentReference } = require("../services/walletFunding");
 const Order = require("../models/Order");
+const Rental = require("../models/Rental");
+const { availableFunds, changeFunds, isWalletAmount } = require("../services/walletFunds");
 const { sendNotification } = require("../services/notification.service");
 
 // PATCH_31: FlowEngine for orchestrated state transitions
@@ -40,7 +43,7 @@ exports.getBalance = async (req, res) => {
     res.json({
       success: true,
       balance: user.walletBalance || 0,
-      withdrawable: user.withdrawable || 0,
+      ...availableFunds(user),
       pendingWithdrawals: user.pendingWithdrawals || 0,
       lifetimeEarnings: user.lifetimeEarnings || 0,
       lastWalletUpdate: user.lastWalletUpdate,
@@ -49,92 +52,6 @@ exports.getBalance = async (req, res) => {
   } catch (err) {
     console.error("getBalance error:", err);
     res.status(500).json({ error: "Failed to get balance" });
-  }
-};
-
-/**
- * PATCH_80: Initiate wallet topup (NO INSTANT CREDIT)
- * PATCH_81: Added duplicate request protection
- * POST /api/wallet/topup
- * Body: { amount }
- *
- * This creates a transaction with status='initiated'.
- * Balance is NOT updated here - it only updates when admin verifies
- * or when payment gateway confirms (future).
- *
- * Flow:
- * 1. User requests topup → status = 'initiated'
- * 2. User pays via gateway (future) or manual verification
- * 3. Admin or webhook verifies → status = 'success', balance updated
- */
-exports.topUp = async (req, res) => {
-  try {
-    const { amount } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Amount must be greater than 0" });
-    }
-
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount < 1) {
-      return res.status(400).json({ error: "Minimum top-up amount is $1" });
-    }
-
-    const userId = req.user.id || req.user._id;
-
-    // Verify user exists
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // PATCH_81: Prevent duplicate rapid requests (within 10 seconds for same amount)
-    const tenSecondsAgo = new Date(Date.now() - 10000);
-    const recentDuplicate = await WalletTransaction.findOne({
-      user: userId,
-      source: "topup",
-      amount: numAmount,
-      status: { $in: ["initiated", "pending"] },
-      createdAt: { $gte: tenSecondsAgo },
-    });
-
-    if (recentDuplicate) {
-      return res.status(409).json({
-        error: "Duplicate request - a similar topup was just submitted",
-        existingTransactionId: recentDuplicate._id,
-        retryAfter: 10000,
-      });
-    }
-
-    // PATCH_80: Create transaction with status='initiated' (NO balance change)
-    const transaction = await WalletTransaction.create({
-      user: userId,
-      type: "credit",
-      amount: numAmount,
-      source: "topup",
-      status: "initiated", // CRITICAL: Not 'success' - no balance change yet
-      provider: "manual", // Phase 1: Manual verification by admin
-      providerRef: null,
-      description: "Wallet top-up (pending verification)",
-      balanceBefore: user.walletBalance || 0,
-      balanceAfter: null, // Will be set when verified
-    });
-
-    // In future: redirect to payment gateway here
-    // For now: user sees "pending" and admin must verify
-
-    res.json({
-      success: true,
-      message: "Top-up request submitted. Pending verification.",
-      transactionId: transaction._id,
-      status: "initiated",
-      amount: numAmount,
-      // DO NOT return updated balance - it hasn't changed
-      currentBalance: user.walletBalance,
-    });
-  } catch (err) {
-    console.error("topUp error:", err);
-    res.status(500).json({ error: "Failed to initiate top-up" });
   }
 };
 
@@ -186,6 +103,7 @@ exports.cancelTopup = async (req, res) => {
         _id: transactionId,
         user: userId,
         source: "topup",
+        provider: { $in: ["manual", "internal", null] },
         status: "initiated", // Only can cancel 'initiated', not 'pending' (in progress)
       },
       {
@@ -206,6 +124,7 @@ exports.cancelTopup = async (req, res) => {
       if (!existingTx) {
         return res.status(404).json({ error: "Transaction not found" });
       }
+      if (existingTx.provider === "paypal") return res.status(409).json({ error: "PayPal manages this payment." });
       if (existingTx.status === "pending") {
         return res.status(400).json({
           error: "Cannot cancel - payment is being processed",
@@ -234,279 +153,6 @@ exports.cancelTopup = async (req, res) => {
     console.error("cancelTopup error:", err);
     res.status(500).json({ error: "Failed to cancel top-up" });
   }
-};
-
-// ============================================================
-// PATCH_82: PayPal Wallet Top-Up (International, Safe Mode)
-// ============================================================
-const {
-  client: paypalClient,
-  paypal,
-  isConfigured: isPayPalConfigured,
-} = require("../config/paypal");
-
-/**
- * PATCH_82: Create PayPal order for wallet top-up
- * POST /api/wallet/topup/paypal/create
- * Body: { amount }
- *
- * Creates a PayPal order and returns the approval URL.
- * Transaction is stored with status='initiated', provider='paypal'.
- * NO wallet credit happens here.
- */
-exports.createPayPalTopup = async (req, res) => {
-  try {
-    // Check if PayPal is configured
-    if (!isPayPalConfigured()) {
-      return res.status(503).json({
-        error: "PayPal is not configured on this server",
-      });
-    }
-
-    const { amount } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Amount must be greater than 0" });
-    }
-
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount < 1) {
-      return res.status(400).json({ error: "Minimum top-up amount is $1" });
-    }
-
-    const userId = req.user.id || req.user._id;
-
-    // Verify user exists
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // PATCH_81: Prevent duplicate rapid requests (within 10 seconds for same amount)
-    const tenSecondsAgo = new Date(Date.now() - 10000);
-    const recentDuplicate = await WalletTransaction.findOne({
-      user: userId,
-      source: "topup",
-      provider: "paypal",
-      amount: numAmount,
-      status: { $in: ["initiated", "pending"] },
-      createdAt: { $gte: tenSecondsAgo },
-    });
-
-    if (recentDuplicate) {
-      return res.status(409).json({
-        error: "Duplicate request - a similar PayPal topup was just submitted",
-        existingTransactionId: recentDuplicate._id,
-        retryAfter: 10000,
-      });
-    }
-
-    // Create PayPal order
-    const request = new paypal.orders.OrdersCreateRequest();
-    request.prefer("return=representation");
-    request.requestBody({
-      intent: "CAPTURE",
-      purchase_units: [
-        {
-          amount: {
-            currency_code: "USD",
-            value: numAmount.toFixed(2),
-          },
-          description: `UREMO Wallet Top-Up - $${numAmount.toFixed(2)}`,
-        },
-      ],
-      application_context: {
-        brand_name: "UREMO",
-        landing_page: "NO_PREFERENCE",
-        user_action: "PAY_NOW",
-        return_url: `${process.env.FRONTEND_URL || "https://uremo.online"}/wallet?paypal=success`,
-        cancel_url: `${process.env.FRONTEND_URL || "https://uremo.online"}/wallet?paypal=cancelled`,
-      },
-    });
-
-    const paypalOrder = await paypalClient.execute(request);
-
-    // Store transaction with PayPal order ID
-    const transaction = await WalletTransaction.create({
-      user: userId,
-      type: "credit",
-      amount: numAmount,
-      source: "topup",
-      status: "initiated", // CRITICAL: Not 'success' - no balance change yet
-      provider: "paypal",
-      providerRef: paypalOrder.result.id, // PayPal Order ID
-      description: "Wallet top-up via PayPal (pending verification)",
-      balanceBefore: user.walletBalance || 0,
-      balanceAfter: null, // Will be set when admin verifies
-    });
-
-    // Get approval URL from PayPal response
-    const approvalLink = paypalOrder.result.links.find(
-      (link) => link.rel === "approve",
-    );
-
-    res.json({
-      success: true,
-      message: "PayPal order created. Redirect user to approve.",
-      transactionId: transaction._id,
-      paypalOrderId: paypalOrder.result.id,
-      approvalUrl: approvalLink?.href,
-      status: "initiated",
-      amount: numAmount,
-      currentBalance: user.walletBalance,
-    });
-  } catch (err) {
-    console.error("createPayPalTopup error:", err);
-    res.status(500).json({
-      error: "Failed to create PayPal order",
-      details: err.message,
-    });
-  }
-};
-
-/**
- * PATCH_82: Confirm PayPal payment (after user approves on PayPal)
- * POST /api/wallet/topup/paypal/confirm
- * Body: { paypalOrderId }
- *
- * Captures the PayPal payment and marks transaction as 'paid_unverified'.
- * STILL NO wallet credit - admin must verify.
- */
-exports.confirmPayPalTopup = async (req, res) => {
-  try {
-    if (!isPayPalConfigured()) {
-      return res.status(503).json({
-        error: "PayPal is not configured on this server",
-      });
-    }
-
-    const { paypalOrderId } = req.body;
-
-    if (!paypalOrderId) {
-      return res.status(400).json({ error: "PayPal Order ID required" });
-    }
-
-    const userId = req.user.id || req.user._id;
-
-    // Find the transaction by PayPal order ID
-    const transaction = await WalletTransaction.findOne({
-      user: userId,
-      provider: "paypal",
-      providerRef: paypalOrderId,
-    });
-
-    if (!transaction) {
-      return res.status(404).json({ error: "Transaction not found" });
-    }
-
-    // Check if already processed
-    if (transaction.status === "paid_unverified") {
-      return res.status(200).json({
-        success: true,
-        message: "Payment already confirmed. Awaiting admin verification.",
-        alreadyConfirmed: true,
-        transactionId: transaction._id,
-        status: transaction.status,
-      });
-    }
-
-    if (transaction.status === "success") {
-      return res.status(200).json({
-        success: true,
-        message: "Transaction already completed.",
-        alreadyProcessed: true,
-        transactionId: transaction._id,
-      });
-    }
-
-    if (transaction.status === "failed") {
-      return res.status(400).json({
-        error: "Transaction was cancelled or failed",
-      });
-    }
-
-    // Capture the PayPal payment
-    const request = new paypal.orders.OrdersCaptureRequest(paypalOrderId);
-    request.requestBody({});
-
-    const capture = await paypalClient.execute(request);
-
-    if (capture.result.status !== "COMPLETED") {
-      // Payment not completed
-      await WalletTransaction.findByIdAndUpdate(transaction._id, {
-        status: "failed",
-        failureReason: `PayPal payment not completed: ${capture.result.status}`,
-      });
-      return res.status(400).json({
-        error: `PayPal payment not completed: ${capture.result.status}`,
-      });
-    }
-
-    // ATOMIC update to paid_unverified (prevents race with webhook)
-    const updatedTx = await WalletTransaction.findOneAndUpdate(
-      {
-        _id: transaction._id,
-        status: { $in: ["initiated", "pending"] },
-      },
-      {
-        $set: {
-          status: "paid_unverified",
-          description: `PayPal payment captured (ID: ${capture.result.id}). Awaiting admin verification.`,
-        },
-      },
-      { new: true },
-    );
-
-    if (!updatedTx) {
-      // Already processed by webhook or another request
-      const existing = await WalletTransaction.findById(transaction._id);
-      return res.status(200).json({
-        success: true,
-        message: "Payment already processed.",
-        transactionId: existing._id,
-        status: existing.status,
-        alreadyProcessed: true,
-      });
-    }
-
-    // CRITICAL: NO wallet balance change here
-    // Balance only updates when admin verifies
-
-    res.json({
-      success: true,
-      message: "PayPal payment confirmed. Awaiting admin verification.",
-      transactionId: updatedTx._id,
-      status: "paid_unverified",
-      amount: updatedTx.amount,
-      // DO NOT return updated balance - it hasn't changed
-    });
-  } catch (err) {
-    console.error("confirmPayPalTopup error:", err);
-
-    // Handle PayPal capture errors
-    if (err.statusCode === 422) {
-      return res.status(400).json({
-        error:
-          "PayPal order cannot be captured. It may be expired or cancelled.",
-      });
-    }
-
-    res.status(500).json({
-      error: "Failed to confirm PayPal payment",
-      details: err.message,
-    });
-  }
-};
-
-/**
- * PATCH_82: Check if PayPal is available
- * GET /api/wallet/topup/paypal/available
- */
-exports.isPayPalAvailable = async (req, res) => {
-  res.json({
-    success: true,
-    available: isPayPalConfigured(),
-  });
 };
 
 /**
@@ -555,146 +201,98 @@ exports.getTransactions = async (req, res) => {
  * Body: { orderId }
  */
 exports.payWithWallet = async (req, res) => {
+  const { orderId, expectedAmount, expectedCurrency } = req.body;
+  if (!orderId || !Order.base.isObjectIdOrHexString(orderId)) {
+    return res.status(400).json({ error: "A valid order ID is required" });
+  }
+  const userId = req.user.id || req.user._id;
+
   try {
-    const { orderId } = req.body;
+    const result = await Order.db.transaction(async (session) => {
+      const order = await Order.findById(orderId)
+        .session(session)
+        .populate("serviceId", "price currency");
+      if (!order) return { status: 404, error: "Order not found" };
+      if (String(order.userId) !== String(userId)) {
+        return { status: 403, error: "Not authorized" };
+      }
+      if (order.status !== "pending" || order.paidAt || ["paid", "refunded"].includes(order.paymentStatus)) {
+        return { status: 400, error: "Order already paid or closed" };
+      }
+      if (order.expiresAt && order.expiresAt <= new Date()) {
+        return { status: 410, error: "Order expired. Reserve the service again." };
+      }
 
-    if (!orderId) {
-      return res.status(400).json({ error: "Order ID required" });
-    }
+      let amount = order.quotedAmount;
+      let currency = order.quotedCurrency;
+      let isRental = order.orderType === "rental";
+      if (amount == null) {
+        // Legacy renewals can lack both orderType and rentalId. The rental still
+        // points at its order and holds the price of the selected plan.
+        const rental = await Rental.findOne({ order: order._id })
+          .select("price currency")
+          .session(session)
+          .lean();
+        isRental = isRental || Boolean(rental);
+        const offer = isRental ? rental : order.serviceId;
+        amount = offer?.price;
+        currency = offer?.currency;
+      }
+      currency = String(currency || "USD").trim().toUpperCase();
+      if (!Number.isFinite(amount) || amount < 0.01) {
+        return { status: 400, error: "Unable to determine order price" };
+      }
+      if (currency !== "USD") {
+        return { status: 400, error: "Wallet payments require a USD quote" };
+      }
+      if ((expectedAmount !== undefined && expectedAmount !== amount) ||
+          (expectedCurrency !== undefined && expectedCurrency !== currency)) {
+        return { status: 409, error: "The order price has changed. Refresh before paying." };
+      }
 
-    const Order = require("../models/Order");
-    // Populate serviceId to get the price
-    const order = await Order.findById(orderId).populate(
-      "serviceId",
-      "price title",
-    );
+      const user = await changeFunds(userId, amount, "spend", session);
 
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+      await WalletTransaction.create([{
+        user: userId,
+        type: "debit",
+        amount,
+        source: isRental ? "rental_purchase" : "service_purchase",
+        status: "success",
+        provider: "internal",
+        referenceId: order._id,
+        description: `Payment for order #${order._id.toString().slice(-6)}`,
+        balanceBefore: user.balanceBefore,
+        balanceAfter: user.walletBalance,
+      }], { session, ordered: true });
 
-    const userId = req.user.id || req.user._id;
-
-    // Check authorization - Order model uses userId, not user
-    const orderUserId = order.userId || order.user;
-    if (!orderUserId || orderUserId.toString() !== userId.toString()) {
-      return res.status(403).json({ error: "Not authorized" });
-    }
-
-    // PATCH_112: Triple-guard against double-pay
-    if (order.paymentStatus === "paid" || order.paidAt || order.status !== "pending") {
-      return res.status(400).json({ error: "Order already paid" });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Get order amount from service price or order fields
-    const orderAmount =
-      order.totalPrice || order.price || order.serviceId?.price || 0;
-
-    if (!orderAmount || orderAmount <= 0) {
-      return res.status(400).json({ error: "Unable to determine order price" });
-    }
-
-    if (user.walletBalance < orderAmount) {
-      return res.status(400).json({
-        error: "Insufficient wallet balance",
-        required: orderAmount,
-        available: user.walletBalance,
-      });
-    }
-
-    // ATOMIC: Deduct from wallet using findOneAndUpdate to prevent race conditions
-    const updateResult = await User.findOneAndUpdate(
-      { _id: userId, walletBalance: { $gte: orderAmount } },
-      { $inc: { walletBalance: -orderAmount } },
-      { new: true },
-    );
-
-    if (!updateResult) {
-      return res.status(400).json({
-        error: "Insufficient wallet balance or concurrent transaction",
-      });
-    }
-
-    // Create debit transaction (PATCH_80: Internal operations are instant - status='success')
-    const source =
-      order.serviceType === "rental" ? "rental_purchase" : "service_purchase";
-    const balanceBefore = (updateResult.walletBalance || 0) + orderAmount; // before was current + what we just deducted
-    await WalletTransaction.create({
-      user: userId,
-      type: "debit",
-      amount: orderAmount,
-      source,
-      status: "success", // PATCH_80: Internal debit is instant
-      provider: "internal", // PATCH_80: Internal system operation
-      referenceId: order._id,
-      description: `Payment for order #${order._id.toString().slice(-6)}`,
-      balanceBefore,
-      balanceAfter: updateResult.walletBalance,
-    });
-
-    // PATCH_110: Update lastWalletUpdate
-    await User.findByIdAndUpdate(userId, {
-      $set: { lastWalletUpdate: new Date() },
-    });
-
-    // PATCH_31: Use FlowEngine for status transition
-    // FlowEngine handles: status update, timeline, affiliate commission (via hooks)
-    try {
-      await FlowEngine.transition("order", order._id, "in_progress", {
+      order.settledAmount = amount;
+      order.settledCurrency = currency;
+      const event = await FlowEngine.saveTransition("order", order, "in_progress", {
         actor: "system",
         reason: "Payment completed via wallet",
         paymentMethod: "wallet",
-        data: { walletBalance: updateResult.walletBalance },
+        data: { walletBalance: user.walletBalance },
       });
+      return { event, walletBalance: user.walletBalance };
+    });
 
-      // PATCH_112: Persist paymentStatus/paymentMethod after FlowEngine success
-      await Order.findByIdAndUpdate(order._id, {
-        $set: { paymentStatus: "paid", paymentMethod: "wallet" },
-      });
-    } catch (flowErr) {
-      // If FlowEngine fails, fall back to direct update for critical payment flow
-      console.error(
-        "[FlowEngine] wallet payment transition failed:",
-        flowErr.message,
-      );
-      order.paymentStatus = "paid";
-      order.paymentMethod = "wallet";
-      order.status = "in_progress";
-      order.paidAt = new Date();
-      await order.save();
-
-      // Process affiliate commission manually if FlowEngine failed
-      try {
-        const {
-          processAffiliateCommission,
-        } = require("../services/affiliateCommission.service");
-        await processAffiliateCommission(order._id, "wallet");
-      } catch (affErr) {
-        console.error("Affiliate commission processing error:", affErr);
-      }
+    if (result.error) {
+      const { status, ...body } = result;
+      return res.status(status).json(body);
     }
-
-    // Refresh order data
-    const updatedOrder = await Order.findById(order._id).lean();
-
-    res.json({
+    const order = result.event.item;
+    order.$session(null);
+    FlowEngine.publishTransition("order", result.event);
+    return res.json({
       success: true,
       message: "Payment successful",
-      order: {
-        _id: updatedOrder._id,
-        paymentStatus: updatedOrder.paymentStatus || "paid",
-        status: updatedOrder.status,
-      },
-      walletBalance: updateResult.walletBalance,
+      order: { _id: order._id, paymentStatus: order.paymentStatus, status: order.status },
+      walletBalance: result.walletBalance,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status === 402 ? 400 : err.status).json({ error: err.message, ...err.fields });
     console.error("payWithWallet error:", err);
-    res.status(500).json({ error: "Payment failed" });
+    return res.status(500).json({ error: "Payment failed" });
   }
 };
 
@@ -702,139 +300,30 @@ exports.payWithWallet = async (req, res) => {
 // ADMIN FUNCTIONS
 // ============================================
 
-/**
- * Admin: Adjust user wallet balance
- * POST /api/admin/wallet/adjust
- * Body: { userId, amount, type, description }
- * PATCH-64: Enhanced with guardrails and audit logging
- */
-exports.adminAdjustBalance = async (req, res) => {
+const adjustments = require("../services/walletAdjustments");
+
+async function respondToAdjustment(req, res, undo) {
   try {
-    const { logAdminAction } = require("../services/adminAudit.service");
-    const { userId, amount, type, description } = req.body;
-
-    if (!userId || !amount || !type) {
-      return res.status(400).json({
-        error: "userId, amount, and type (credit/debit) required",
-      });
-    }
-
-    if (!["credit", "debit"].includes(type)) {
-      return res.status(400).json({ error: "Type must be credit or debit" });
-    }
-
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount <= 0) {
-      return res.status(400).json({ error: "Amount must be greater than 0" });
-    }
-
-    // PATCH-64 GUARDRAIL: Require description/reason for all adjustments
-    if (!description || description.trim().length < 5) {
-      return res.status(400).json({
-        error: "Description is required (minimum 5 characters)",
-        hint: "Provide a reason for this wallet adjustment",
-      });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    const previousBalance = user.walletBalance || 0;
-    const resultingBalance =
-      type === "credit"
-        ? previousBalance + numAmount
-        : previousBalance - numAmount;
-
-    // PATCH-64 GUARDRAIL: Check if debit would result in negative balance
-    if (type === "debit" && resultingBalance < 0) {
-      return res.status(400).json({
-        error:
-          "Insufficient balance for debit - would result in negative balance",
-        currentBalance: previousBalance,
-        requestedDebit: numAmount,
-        resultingBalance: resultingBalance,
-      });
-    }
-
-    // PATCH-64 GUARDRAIL: Warn on large adjustments (> $1000)
-    if (numAmount > 1000) {
-      console.warn(
-        `[AUDIT] Large wallet adjustment: $${numAmount} ${type} for user ${userId} by admin ${req.user?.email}`,
-      );
-    }
-
-    // PATCH_96: Atomic balance adjustment using $inc — prevents race conditions
-    const incAmount = type === "credit" ? numAmount : -numAmount;
-    const updatedUser = await User.findByIdAndUpdate(
-      userId,
-      { $inc: { walletBalance: incAmount } },
-      { new: true },
-    );
-
-    // Create transaction record (PATCH_80: Admin adjustments are instant)
-    await WalletTransaction.create({
-      user: userId,
-      type,
-      amount: numAmount,
-      source: "admin_adjustment",
-      status: "success",
-      provider: "manual",
-      description: description || `Admin ${type} by ${req.user.email}`,
-      balanceBefore: previousBalance,
-      balanceAfter: updatedUser.walletBalance,
-    });
-
-    // PATCH_110: Update lastWalletUpdate
-    await User.findByIdAndUpdate(userId, {
-      $set: { lastWalletUpdate: new Date() },
-    });
-
-    // PATCH-64: Log admin action
-    await logAdminAction({
-      adminId: req.user?._id || req.user?.id,
-      adminEmail: req.user?.email,
-      action: type === "credit" ? "wallet_credit" : "wallet_debit",
-      entityType: "wallet",
-      entityId: String(userId),
-      previousState: { balance: previousBalance },
-      newState: { balance: updatedUser.walletBalance },
-      reason: description,
-      metadata: { amount: numAmount, type },
-    });
-
-    // PATCH_29: Notify user about wallet update
-    try {
-      const action = type === "credit" ? "credited" : "debited";
+    const { receipt, replayed } = undo ? await adjustments.undo(req.user, req.params.id) : await adjustments.adjust(req.user, req.body);
+    const action = receipt.type === "credit" ? "credited" : "debited";
+    if (!replayed) {
       await sendNotification({
-        userId: userId,
-        title: "Wallet Update",
-        message: `Your wallet has been ${action} $${numAmount.toFixed(2)}. New balance: $${updatedUser.walletBalance.toFixed(2)}`,
-        type: "wallet",
-      });
-    } catch (notifErr) {
-      console.error(
-        "[notification] wallet adjustment failed:",
-        notifErr.message,
-      );
+        userId: receipt.user, title: "Wallet Update", type: "wallet",
+        message: `Your wallet was ${action} $${receipt.amount.toFixed(2)}. Balance after adjustment: $${receipt.balanceAfter.toFixed(2)}`,
+      }).catch(err => console.warn("[notification] wallet adjustment failed:", err.name));
     }
-
-    res.json({
-      success: true,
-      message: `Successfully ${type}ed $${numAmount.toFixed(2)} ${type === "credit" ? "to" : "from"} user wallet`,
-      user: {
-        _id: updatedUser._id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        walletBalance: updatedUser.walletBalance,
-      },
-    });
+    const user = await User.findById(receipt.user).select("name email walletBalance").lean();
+    res.json({ success: true, transactionId: receipt._id, replayed, user,
+      message: undo ? "Adjustment reversed." : `Wallet ${action} $${receipt.amount.toFixed(2)}.` });
   } catch (err) {
-    console.error("adminAdjustBalance error:", err);
-    res.status(500).json({ error: "Failed to adjust balance" });
+    if (err.status) return res.status(err.status === 402 ? 400 : err.status).json({ error: err.message, ...err.fields });
+    console.error("Wallet adjustment failed", { name: err.name, code: err.code });
+    res.status(500).json({ error: "Failed to adjust balance. Retry with the same request." });
   }
-};
+}
+
+exports.adminAdjustBalance = (req, res) => respondToAdjustment(req, res, false);
+exports.adminUndoAdjustment = (req, res) => respondToAdjustment(req, res, true);
 
 /**
  * PATCH_80: Admin - Get all pending topup requests
@@ -851,6 +340,7 @@ exports.adminGetPendingTopups = async (req, res) => {
     const [pendingTopups, total] = await Promise.all([
       WalletTransaction.find({
         source: "topup",
+        provider: { $in: ["manual", "internal", null] },
         status: { $in: ["initiated", "pending", "paid_unverified"] },
       })
         .populate("user", "name email")
@@ -860,6 +350,7 @@ exports.adminGetPendingTopups = async (req, res) => {
         .lean(),
       WalletTransaction.countDocuments({
         source: "topup",
+        provider: { $in: ["manual", "internal", null] },
         status: { $in: ["initiated", "pending", "paid_unverified"] },
       }),
     ]);
@@ -908,115 +399,38 @@ exports.adminVerifyTopup = async (req, res) => {
         .json({ error: "Action must be approve, reject, or pending" });
     }
 
-    // PATCH_81: ATOMIC operation - update status ONLY if in allowed state
-    // PATCH_82: Added paid_unverified for PayPal payments
-    // This prevents race conditions where two requests could both pass a status check
-    const allowedCurrentStatuses = ["initiated", "pending", "paid_unverified"];
-
-    let targetStatus;
-    let updateFields = {};
-
+    const { updatedTransaction, previousStatus, user, updatedUser } = await User.db.transaction(async session => {
+      const transaction = await WalletTransaction.findById(transactionId).session(session);
+      const fail = (status, message, fields) => { throw Object.assign(new Error(message), { status, fields }); };
+      if (!transaction) fail(404, "Transaction not found");
+      if (transaction.provider != null && !["manual", "internal"].includes(transaction.provider)) fail(409, "Gateway payments require confirmation from the provider.");
+      if (transaction.source !== "topup") fail(400, "Only topup transactions can be verified");
+      if (!["initiated", "pending", "paid_unverified"].includes(transaction.status)) {
+        fail(400, "Transaction already processed", { alreadyProcessed: true });
+      }
+      const user = await User.findById(transaction.user).select("name email").session(session).lean();
+      if (!user) fail(404, "User not found");
+      const previousStatus = transaction.status;
+      let updatedUser;
+      if (action === "approve") {
+        const reference = paymentReference(req.body.settlementReference);
+        if (!reference) {
+          fail(400, "Enter the unique reference from the verified payment record (4–80 letters, digits, dots, slashes, underscores or hyphens).");
+        }
+        if (transaction.paymentReference && transaction.paymentReference !== reference) fail(400, "The verified payment reference must match the submitted transfer.");
+        transaction.set({ settlementReference: reference, settlementVerifiedBy: req.user.id });
+        updatedUser = await changeFunds(user._id, transaction.amount, "credit", session);
+        transaction.set({ status: "success", description: "Wallet top-up (verified)",
+          balanceBefore: updatedUser.balanceBefore, balanceAfter: updatedUser.walletBalance });
+      } else if (action === "reject") {
+        transaction.set({ status: "failed", failureReason: reason || "Rejected by admin" });
+      } else {
+        transaction.status = "pending";
+      }
+      await transaction.save({ session });
+      return { updatedTransaction: transaction, previousStatus, user, updatedUser };
+    });
     if (action === "approve") {
-      targetStatus = "success";
-      updateFields = {
-        status: "success",
-        description: "Wallet top-up (verified)",
-      };
-    } else if (action === "reject") {
-      targetStatus = "failed";
-      updateFields = {
-        status: "failed",
-        failureReason: reason || "Rejected by admin",
-      };
-    } else if (action === "pending") {
-      targetStatus = "pending";
-      updateFields = { status: "pending" };
-    }
-
-    // ATOMIC: Only update if status is still in allowed state
-    const updatedTransaction = await WalletTransaction.findOneAndUpdate(
-      {
-        _id: transactionId,
-        source: "topup",
-        status: { $in: allowedCurrentStatuses },
-      },
-      { $set: updateFields },
-      { new: true },
-    ).populate("user", "name email walletBalance");
-
-    // If null, transaction either doesn't exist or already processed
-    if (!updatedTransaction) {
-      // Check if it exists but was already processed
-      const existingTx = await WalletTransaction.findById(transactionId);
-      if (!existingTx) {
-        return res.status(404).json({ error: "Transaction not found" });
-      }
-      if (existingTx.source !== "topup") {
-        return res
-          .status(400)
-          .json({ error: "Only topup transactions can be verified" });
-      }
-      if (existingTx.status === "success") {
-        return res.status(400).json({
-          error: "Transaction already approved - cannot process again",
-          alreadyProcessed: true,
-        });
-      }
-      if (existingTx.status === "failed") {
-        return res.status(400).json({
-          error: "Transaction already rejected/failed - cannot process again",
-          alreadyProcessed: true,
-        });
-      }
-      return res
-        .status(400)
-        .json({ error: "Transaction could not be updated" });
-    }
-
-    const previousStatus =
-      action === "approve" || action === "reject"
-        ? allowedCurrentStatuses.includes(updatedTransaction.status)
-          ? "initiated"
-          : updatedTransaction.status
-        : updatedTransaction.status;
-
-    const user = await User.findById(
-      updatedTransaction.user._id || updatedTransaction.user,
-    );
-    if (!user) {
-      // Rollback transaction status
-      await WalletTransaction.findByIdAndUpdate(transactionId, {
-        status: "initiated",
-      });
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Process based on action
-    if (action === "approve") {
-      // CRITICAL: Credit wallet balance ONLY after atomic status update succeeded
-      const balanceBefore = user.walletBalance || 0;
-      const updatedUser = await User.findByIdAndUpdate(
-        user._id,
-        {
-          $inc: { walletBalance: updatedTransaction.amount },
-          $set: { lastWalletUpdate: new Date() },
-        },
-        { new: true },
-      );
-
-      if (!updatedUser) {
-        // Rollback transaction status
-        await WalletTransaction.findByIdAndUpdate(transactionId, {
-          status: "initiated",
-        });
-        return res.status(500).json({ error: "Failed to update user balance" });
-      }
-
-      // Update balanceBefore + balanceAfter
-      await WalletTransaction.findByIdAndUpdate(transactionId, {
-        balanceBefore,
-        balanceAfter: updatedUser.walletBalance,
-      });
 
       // Log admin action
       await logAdminAction({
@@ -1122,6 +536,10 @@ exports.adminVerifyTopup = async (req, res) => {
       });
     }
   } catch (err) {
+    if (err.code === 11000 && err.keyPattern?.settlementReference) {
+      return res.status(409).json({ error: "This payment reference has already funded a wallet." });
+    }
+    if (err.status) return res.status(err.status).json({ error: err.message, ...err.fields });
     console.error("adminVerifyTopup error:", err);
     res.status(500).json({ error: "Failed to verify topup" });
   }
@@ -1145,6 +563,7 @@ exports.adminGetUserWallet = async (req, res) => {
 
     const [transactions, total] = await Promise.all([
       WalletTransaction.find({ user: userId })
+        .select("+settlementReference +settlementVerifiedBy +adjustmentKey")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -1160,7 +579,9 @@ exports.adminGetUserWallet = async (req, res) => {
         email: user.email,
         walletBalance: user.walletBalance,
       },
-      transactions,
+      transactions: transactions.map(({ adjustmentKey, ...tx }) => ({
+        ...tx, canUndo: tx.source === "admin_adjustment" && tx.status === "success" && Boolean(adjustmentKey) && !tx.undoTransactionId,
+      })),
       pagination: {
         page,
         limit,
@@ -1454,72 +875,40 @@ const WithdrawalRequest = require("../models/WithdrawalRequest");
  */
 exports.requestWithdrawal = async (req, res) => {
   try {
-    const { amount } = req.body;
+    const raw = req.body?.amount;
+    const requestId = req.body?.requestId;
+    if (requestId !== undefined && (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{8,100}$/.test(requestId))) {
+      return res.status(400).json({ error: "Invalid withdrawal request ID" });
+    }
+    const amount = typeof raw === "string" && raw.trim() ? Number(raw) : raw;
+    if (!isWalletAmount(amount) || amount < 10) {
+      return res.status(400).json({ error: "Minimum withdrawal is $10. Use at most two decimal places." });
+    }
     const userId = req.user.id || req.user._id;
-
-    if (!amount || isNaN(parseFloat(amount))) {
-      return res.status(400).json({ error: "Valid amount required" });
-    }
-
-    const numAmount = parseFloat(amount);
-    if (numAmount < 10) {
-      return res.status(400).json({ error: "Minimum withdrawal is $10" });
-    }
-
-    // Atomic: only decrement withdrawable if sufficient
-    const updatedUser = await User.findOneAndUpdate(
-      { _id: userId, withdrawable: { $gte: numAmount } },
-      {
-        $inc: { withdrawable: -numAmount, pendingWithdrawals: numAmount },
-        $set: { lastWalletUpdate: new Date() },
-      },
-      { new: true },
-    );
-
-    if (!updatedUser) {
-      const user = await User.findById(userId).select("withdrawable");
-      return res.status(400).json({
-        error: "Insufficient withdrawable balance",
-        available: user?.withdrawable || 0,
-        requested: numAmount,
-      });
-    }
-
-    const balanceBefore = updatedUser.walletBalance; // balance didn't change
-
-    // Create pending transaction
-    const tx = await WalletTransaction.create({
-      user: userId,
-      type: "debit",
-      amount: numAmount,
-      source: "withdrawal_request",
-      status: "pending",
-      provider: "internal",
-      description: `Withdrawal request for $${numAmount.toFixed(2)}`,
-      balanceBefore,
-      balanceAfter: null, // Not finalized yet
+    const result = await User.db.transaction(async session => {
+      if (requestId) {
+        const prior = await WithdrawalRequest.findOne({ userId, requestId }).session(session).lean();
+        if (prior) {
+          if (prior.amount !== amount) throw Object.assign(new Error("Request ID was used for a different withdrawal amount"), { status: 409 });
+          const account = await User.findById(userId).select("walletBalance pendingWithdrawals withdrawable").session(session).lean();
+          return { withdrawal: { _id: prior._id, amount, status: prior.status }, withdrawable: availableFunds(account).withdrawable,
+            pendingWithdrawals: account.pendingWithdrawals || 0, replayed: true };
+        }
+      }
+      const user = await changeFunds(userId, amount, "reserve", session);
+      const [tx] = await WalletTransaction.create([{
+        user: userId, type: "debit", amount, source: "withdrawal_request", status: "pending", provider: "internal",
+        description: "Withdrawal request for $" + amount.toFixed(2), balanceBefore: user.walletBalance, balanceAfter: null,
+      }], { session, ordered: true });
+      const [withdrawal] = await WithdrawalRequest.create([{
+        userId, amount, requestId, status: "pending", transactionId: tx._id,
+      }], { session, ordered: true });
+      return { withdrawal: { _id: withdrawal._id, amount, status: "pending" },
+        withdrawable: user.withdrawable, pendingWithdrawals: user.pendingWithdrawals, replayed: false };
     });
-
-    // Create WithdrawalRequest record
-    const withdrawal = await WithdrawalRequest.create({
-      userId,
-      amount: numAmount,
-      status: "pending",
-      transactionId: tx._id,
-    });
-
-    res.json({
-      success: true,
-      message: `Withdrawal request of $${numAmount.toFixed(2)} submitted`,
-      withdrawal: {
-        _id: withdrawal._id,
-        amount: numAmount,
-        status: "pending",
-      },
-      withdrawable: updatedUser.withdrawable,
-      pendingWithdrawals: updatedUser.pendingWithdrawals,
-    });
+    res.json({ success: true, message: "Withdrawal request submitted", ...result });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...err.fields });
     console.error("requestWithdrawal error:", err);
     res.status(500).json({ error: "Failed to submit withdrawal request" });
   }
@@ -1550,26 +939,32 @@ exports.getMyWithdrawals = async (req, res) => {
  */
 exports.adminGetWithdrawals = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, before } = req.query;
     const filter = {};
-    if (
-      status &&
-      ["pending", "approved", "rejected", "paid"].includes(status)
-    ) {
+    if (status) {
+      if (!["pending", "approved", "rejected", "paid"].includes(status)) return res.status(400).json({ error: "Invalid withdrawal status" });
       filter.status = status;
     }
-
-    const withdrawals = await WithdrawalRequest.find(filter)
+    if (before !== undefined) {
+      const parts = typeof before === "string" && /^(none|\d{1,15})\.([a-f\d]{24})$/i.exec(before);
+      if (!parts) return res.status(400).json({ error: "Invalid withdrawal cursor" });
+      const createdAt = parts[1] === "none" ? null : new Date(Number(parts[1]));
+      filter.$or = [{ createdAt, _id: { $lt: parts[2] } }];
+      if (createdAt) filter.$or.push({ createdAt: { $lt: createdAt } }, { createdAt: null });
+    }
+    const rows = await WithdrawalRequest.find(filter)
       .populate(
         "userId",
         "name email walletBalance withdrawable pendingWithdrawals",
       )
       .populate("reviewedBy", "name email")
-      .sort({ createdAt: -1 })
-      .limit(100)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(101)
       .lean();
-
-    res.json({ success: true, withdrawals });
+    const withdrawals = rows.slice(0, 100);
+    const last = withdrawals.at(-1);
+    const nextCursor = rows.length > withdrawals.length ? (last.createdAt?.getTime() ?? "none") + "." + last._id : null;
+    res.json({ success: true, withdrawals, nextCursor });
   } catch (err) {
     console.error("adminGetWithdrawals error:", err);
     res.status(500).json({ error: "Failed to get withdrawals" });
@@ -1621,63 +1016,33 @@ exports.adminApproveWithdrawal = async (req, res) => {
 exports.adminMarkWithdrawalPaid = async (req, res) => {
   try {
     const adminId = req.user._id || req.user.id;
-
-    // Atomic: only process if status is approved
-    const withdrawal = await WithdrawalRequest.findOneAndUpdate(
-      { _id: req.params.id, status: "approved" },
-      { $set: { status: "paid", reviewedAt: new Date(), reviewedBy: adminId } },
-      { new: true },
-    );
-
-    if (!withdrawal) {
-      return res
-        .status(404)
-        .json({ error: "Withdrawal not found or not approved" });
-    }
-
-    // Atomic: deduct from balance and pendingWithdrawals
-    const updatedUser = await User.findOneAndUpdate(
-      { _id: withdrawal.userId, walletBalance: { $gte: withdrawal.amount } },
-      {
-        $inc: {
-          walletBalance: -withdrawal.amount,
-          pendingWithdrawals: -withdrawal.amount,
-        },
-        $set: { lastWalletUpdate: new Date() },
-      },
-      { new: true },
-    );
-
-    if (!updatedUser) {
-      // Rollback withdrawal status
-      await WithdrawalRequest.findByIdAndUpdate(withdrawal._id, {
-        status: "approved",
-      });
-      return res
-        .status(400)
-        .json({ error: "Insufficient balance for withdrawal payout" });
-    }
-
-    const balanceBefore = (updatedUser.walletBalance || 0) + withdrawal.amount;
-
-    // Create completion transaction
-    const tx = await WalletTransaction.create({
-      user: withdrawal.userId,
-      type: "debit",
-      amount: withdrawal.amount,
-      source: "withdrawal_completed",
-      status: "success",
-      provider: "manual",
-      referenceId: withdrawal._id,
-      description: `Withdrawal #${withdrawal._id.toString().slice(-6)} paid out`,
-      balanceBefore,
-      balanceAfter: updatedUser.walletBalance,
+    const result = await User.db.transaction(async session => {
+      const withdrawal = await WithdrawalRequest.findOne({ _id: req.params.id, status: "approved" }).session(session);
+      if (!withdrawal) return null;
+      const user = await changeFunds(withdrawal.userId, withdrawal.amount, "payout", session);
+      const ledger = {
+        user: withdrawal.userId, type: "debit", amount: withdrawal.amount, source: "withdrawal_completed",
+        status: "success", provider: "manual", referenceId: withdrawal._id,
+        description: "Withdrawal #" + String(withdrawal._id).slice(-6) + " paid out",
+        balanceBefore: user.balanceBefore, balanceAfter: user.walletBalance,
+      };
+      // Finalize the pending row in place so ordinary wallet history has a single
+      // successful debit. Some historical requests have no linked transaction.
+      let tx;
+      if (withdrawal.transactionId) {
+        tx = await WalletTransaction.findOneAndUpdate({
+          _id: withdrawal.transactionId, user: withdrawal.userId, source: "withdrawal_request", status: "pending",
+        }, { $set: ledger }, { new: true, session });
+        if (!tx) throw Object.assign(new Error("Withdrawal ledger requires reconciliation"), { status: 409 });
+      } else {
+        [tx] = await WalletTransaction.create([ledger], { session, ordered: true });
+      }
+      withdrawal.set({ status: "paid", reviewedAt: new Date(), reviewedBy: adminId, completionTransactionId: tx._id });
+      await withdrawal.save({ session });
+      return { withdrawal, newBalance: user.walletBalance };
     });
-
-    // Store completion transaction on withdrawal
-    await WithdrawalRequest.findByIdAndUpdate(withdrawal._id, {
-      completionTransactionId: tx._id,
-    });
+    if (!result) return res.status(404).json({ error: "Withdrawal not found or not approved" });
+    const { withdrawal, newBalance } = result;
 
     // Notify user
     try {
@@ -1695,9 +1060,10 @@ exports.adminMarkWithdrawalPaid = async (req, res) => {
       success: true,
       message: `Withdrawal of $${withdrawal.amount.toFixed(2)} marked as paid`,
       withdrawal,
-      newBalance: updatedUser.walletBalance,
+      newBalance,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...err.fields });
     console.error("adminMarkWithdrawalPaid error:", err);
     res.status(500).json({ error: "Failed to mark withdrawal as paid" });
   }
@@ -1712,41 +1078,18 @@ exports.adminRejectWithdrawal = async (req, res) => {
     const { adminNote } = req.body;
     const adminId = req.user._id || req.user.id;
 
-    const withdrawal = await WithdrawalRequest.findOneAndUpdate(
-      { _id: req.params.id, status: { $in: ["pending", "approved"] } },
-      {
-        $set: {
-          status: "rejected",
-          reviewedAt: new Date(),
-          reviewedBy: adminId,
-          adminNote: adminNote || "Rejected by admin",
-        },
-      },
-      { new: true },
-    );
-
-    if (!withdrawal) {
-      return res
-        .status(404)
-        .json({ error: "Withdrawal not found or already processed" });
-    }
-
-    // Refund: restore withdrawable, reduce pendingWithdrawals
-    await User.findByIdAndUpdate(withdrawal.userId, {
-      $inc: {
-        withdrawable: withdrawal.amount,
-        pendingWithdrawals: -withdrawal.amount,
-      },
-      $set: { lastWalletUpdate: new Date() },
+    const withdrawal = await User.db.transaction(async session => {
+      const record = await WithdrawalRequest.findOne({ _id: req.params.id, status: { $in: ["pending", "approved"] } }).session(session);
+      if (!record) return null;
+      await changeFunds(record.userId, record.amount, "release", session);
+      record.set({ status: "rejected", reviewedAt: new Date(), reviewedBy: adminId, adminNote: adminNote || "Rejected by admin" });
+      await record.save({ session });
+      if (record.transactionId) await WalletTransaction.updateOne({ _id: record.transactionId }, {
+        $set: { status: "failed", failureReason: adminNote || "Withdrawal rejected by admin" },
+      }, { session });
+      return record;
     });
-
-    // Mark the original pending transaction as failed
-    if (withdrawal.transactionId) {
-      await WalletTransaction.findByIdAndUpdate(withdrawal.transactionId, {
-        status: "failed",
-        failureReason: adminNote || "Withdrawal rejected by admin",
-      });
-    }
+    if (!withdrawal) return res.status(404).json({ error: "Withdrawal not found or already processed" });
 
     res.json({
       success: true,
@@ -1754,6 +1097,7 @@ exports.adminRejectWithdrawal = async (req, res) => {
       withdrawal,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...err.fields });
     console.error("adminRejectWithdrawal error:", err);
     res.status(500).json({ error: "Failed to reject withdrawal" });
   }

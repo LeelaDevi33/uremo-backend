@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
  */
 const projectSchema = new mongoose.Schema(
   {
+    paidOfferRevision: { type: Number, default: 0, select: false },
     title: {
       type: String,
       required: true,
@@ -26,16 +27,8 @@ const projectSchema = new mongoose.Schema(
     category: {
       type: String,
       required: true,
-      enum: [
-        "microjobs",
-        "writing",
-        "teaching",
-        "coding_math",
-        "outlier",
-        "data_entry",
-        "screener",
-        "other",
-      ],
+      trim: true,
+      maxlength: 48,
     },
     // Project details
     instructions: {
@@ -50,6 +43,7 @@ const projectSchema = new mongoose.Schema(
       },
     ],
     // Payment
+    priority: { type: String, enum: ["low", "medium", "high", "urgent"], default: "medium" },
     payRate: {
       type: Number,
       required: true,

@@ -1,3 +1,5 @@
+const { getFrontendUrl } = require("../config/frontendUrl");
+
 function escapeHtml(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -11,13 +13,6 @@ function humanizeCategory(category) {
   const c = String(category || "").trim();
   if (!c) return "General";
   return c.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
-function getFrontendUrl() {
-  return String(process.env.FRONTEND_URL || "https://uremo.online").replace(
-    /\/$/,
-    "",
-  );
 }
 
 function baseLayout({ title, preheader, bodyHtml }) {
@@ -90,109 +85,17 @@ function kvRow(label, value) {
   `;
 }
 
-function welcomeEmail({ name }) {
-  const browseUrl = `${getFrontendUrl()}/buy-service`;
-
-  const bodyHtml = `
-    <h1 style="margin:0 0 8px 0;font-size:24px;line-height:30px;color:#FFFFFF;">Welcome to UREMO</h1>
-    <p style="margin:0 0 16px 0;color:#B6C2D6;font-size:14px;line-height:22px;">
-      Hi ${escapeHtml(
-        name || "there",
-      )}, your account is ready. UREMO is a <b>manual, secure, verified</b> service desk.
-    </p>
-
-    <div style="margin:0 0 14px 0;padding:14px;border-radius:14px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.08);">
-      <div style="font-weight:700;margin:0 0 8px 0;">What we help with</div>
-      <ul style="margin:0;padding-left:18px;color:#D6DEF0;font-size:14px;line-height:22px;">
-        <li>Outlier onboarding</li>
-        <li>Handshake verification</li>
-        <li>Airtm assistance</li>
-        <li>Binance / Crypto account support</li>
-        <li>KYC + Screening support</li>
-      </ul>
-    </div>
-
-    <div style="margin-top:18px;">${primaryButton({
-      href: browseUrl,
-      label: "Browse Services",
-    })}</div>
-  `;
-
+function welcomeEmail(recipient) {
+  const name = typeof recipient === "string" ? recipient.split("@")[0] : recipient?.name;
   return baseLayout({
     title: "Welcome to UREMO",
-    preheader: "Welcome to UREMO — browse verified services.",
-    bodyHtml,
+    preheader: "Find a project or apply for an open role.",
+    bodyHtml: `
+      <h1>Welcome to UREMO</h1>
+      <p>Hi ${escapeHtml(name || "there")}, your account is ready. Apply to a specialization for free to qualify for matching rentals. Full Access purchases are available to any member.</p>
+      ${primaryButton({ href: `${getFrontendUrl()}/open-roles`, label: "Browse open roles" })}
+    `,
   });
-}
-
-// ============================
-// EMAIL_AUTOMATION_PACK_01
-// New template API (do not break existing callers)
-// ============================
-
-function formatMoney(value) {
-  const n = Number(value);
-  if (Number.isFinite(n)) return `$${n}`;
-  return String(value || "");
-}
-
-function welcomeEmailNew(userEmail, topServices) {
-  const browseUrl = `${getFrontendUrl()}/buy-service`;
-  const email = String(userEmail || "").trim();
-  const nameGuess = email ? email.split("@")[0] : "there";
-  const services = Array.isArray(topServices) ? topServices : [];
-
-  const listHtml = services.length
-    ? `
-      <div style="margin:14px 0 0 0;">
-        <div style="font-weight:700;margin:0 0 8px 0;">Top services to start with</div>
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:6px;">
-          ${services
-            .slice(0, 3)
-            .map((s) => {
-              const title = s?.title ? String(s.title) : "Service";
-              const category = s?.category ? humanizeCategory(s.category) : "";
-              const price = formatMoney(s?.price);
-              return kvRow(
-                title,
-                `${category ? category + " • " : ""}${price}`,
-              );
-            })
-            .join("")}
-        </table>
-      </div>
-    `
-    : "";
-
-  const bodyHtml = `
-    <h1 style="margin:0 0 8px 0;font-size:24px;line-height:30px;color:#FFFFFF;">Welcome to UREMO</h1>
-    <p style="margin:0 0 12px 0;color:#B6C2D6;font-size:14px;line-height:22px;">
-      Hi ${escapeHtml(
-        nameGuess,
-      )}, thanks for joining UREMO. Browse trusted onboarding/KYC assistance services and track your order progress.
-    </p>
-    ${listHtml}
-    <div style="margin-top:18px;">${primaryButton({
-      href: browseUrl,
-      label: "Browse Services",
-    })}</div>
-  `;
-
-  return baseLayout({
-    title: "Welcome to UREMO",
-    preheader: "Welcome to UREMO — browse verified services.",
-    bodyHtml,
-  });
-}
-
-// Backward compatible wrapper:
-// - welcomeEmail({ name })   (legacy)
-// - welcomeEmail(userEmail, topServices) (new)
-function welcomeEmailWrapper(arg1, arg2) {
-  if (arg1 && typeof arg1 === "object" && !Array.isArray(arg1)) {
-    return welcomeEmail(arg1);
-  }
-  return welcomeEmailNew(arg1, arg2);
 }
 
 function paymentPendingReminder(order) {
@@ -517,8 +420,9 @@ function adminApplicationAlertEmail({ userEmail, category }) {
 }
 
 module.exports = {
+  escapeHtml,
   // New pack API
-  welcomeEmail: welcomeEmailWrapper,
+  welcomeEmail,
   paymentPendingReminder,
   paymentSubmitted,
   paymentVerified,

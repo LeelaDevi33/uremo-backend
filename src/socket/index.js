@@ -1,3 +1,4 @@
+const { tokenIdentity, activeAccounts, sessionIsCurrent } = require("../services/tokenIdentity");
 /**
  * Socket.io server setup and event handlers for realtime chat.
  */
@@ -6,6 +7,8 @@ const jwt = require("jsonwebtoken");
 const Order = require("../models/Order");
 const OrderMessage = require("../models/OrderMessage");
 const mongoose = require("mongoose");
+const { isAllowedOrigin, checkCorsOrigin } = require("../config/browserOrigins");
+const { orderChatDenial } = require("../services/orderChatPolicy");
 
 let io = null;
 
@@ -42,30 +45,15 @@ function safeAck(ack, payload) {
 }
 
 /**
- * Allowed origins for Socket.io CORS.
- */
-const isAllowedOrigin = (origin) => {
-  if (!origin) return true;
-  return (
-    origin === "https://uremo.online" ||
-    origin === "https://www.uremo.online" ||
-    origin === "http://localhost:3000" ||
-    /^https:\/\/.*\.vercel\.app$/.test(origin)
-  );
-};
-
-/**
  * Initialize Socket.io server on existing HTTP server.
  */
 function initSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
-      origin: (origin, callback) => {
-        if (isAllowedOrigin(origin)) return callback(null, true);
-        return callback(new Error("CORS blocked"), false);
-      },
+      origin: checkCorsOrigin,
       credentials: true,
     },
+    allowRequest: (req, callback) => callback(null, isAllowedOrigin(req.headers.origin)),
     transports: ["websocket", "polling"],
     pingTimeout: 60000,
     pingInterval: 25000,
@@ -86,13 +74,7 @@ function initSocket(httpServer) {
         return next(new Error("Server configuration error"));
       }
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const normalized = {
-        ...(decoded && typeof decoded === "object" ? decoded : {}),
-      };
-      normalized.id =
-        normalized.id || normalized._id || normalized.userId || normalized.uid;
-
-      socket.user = normalized;
+      socket.user = await tokenIdentity(decoded);
       next();
     } catch (err) {
       pushSocketLog("SOCKET_AUTH_FAIL", { error: "AUTH_FAILED" });
@@ -111,8 +93,50 @@ function initSocket(httpServer) {
  */
 async function handleConnection(socket) {
   const userId = socket.user?.id;
-  const userRole = socket.user?.role;
-  const isAdmin = userRole === "admin";
+  let userRole = socket.user.role;
+  let isAdmin = userRole === "admin";
+  // Long-lived connections also revalidate privileges after the handshake.
+  socket.use(async (_packet, next) => {
+    try {
+      const identity = await tokenIdentity(socket.user);
+      if (isAdmin && !identity.isAdmin) {
+        leaveOrder();
+        socket.leave("admin:orders");
+        socket.join("order-chat:workers");
+        userRole = socket.user.role = "user";
+        isAdmin = false;
+      }
+      next();
+    } catch {
+      socket.disconnect(true);
+    }
+  });
+
+  function leaveOrder() {
+    if (socket.currentOrderRoom) {
+      socket.leave(socket.currentOrderRoom);
+      socket.leave(socket.currentOrderRoom + ":user:" + userId);
+      socket.currentOrderRoom = null;
+      socket.currentOrderId = null;
+    }
+  }
+
+  async function permittedOrder(orderId, tag, ack) {
+    try {
+      const order = await Order.findById(orderId).select("userId status").lean();
+      const error = orderChatDenial(order, userId, isAdmin);
+      if (!error) return order;
+      if (socket.currentOrderId === orderId) leaveOrder();
+      pushSocketLog(tag, { userId, role: userRole, orderId, error });
+      safeAck(ack, { ok: false, error });
+    } catch {
+      pushSocketLog(tag, { userId, role: userRole, orderId, error: "ORDER_UNAVAILABLE" });
+      safeAck(ack, { ok: false, error: "ORDER_UNAVAILABLE" });
+    }
+    return null;
+  }
+
+  if (!isAdmin) socket.join("order-chat:workers");
 
   pushSocketLog("SOCKET_CONNECT_OK", { userId, role: userRole });
 
@@ -169,35 +193,12 @@ async function handleConnection(socket) {
       return;
     }
 
-    // Check permission
-    const order = await Order.findById(orderId).select("userId").lean();
-    if (!order) {
-      pushSocketLog("SOCKET_JOIN_FAIL", {
-        userId,
-        role: userRole,
-        orderId,
-        error: "ORDER_NOT_FOUND",
-      });
-      safeAck(ack, { ok: false, error: "ORDER_NOT_FOUND" });
-      return;
-    }
-
-    const orderOwnerId = String(order.userId);
-    const canJoin = isAdmin || orderOwnerId === String(userId);
-
-    if (!canJoin) {
-      pushSocketLog("SOCKET_JOIN_FAIL", {
-        userId,
-        role: userRole,
-        orderId,
-        error: "FORBIDDEN",
-      });
-      safeAck(ack, { ok: false, error: "FORBIDDEN" });
-      return;
-    }
+    if (!await permittedOrder(orderId, "SOCKET_JOIN_FAIL", ack)) return;
 
     const room = `order:${orderId}`;
+    if (socket.currentOrderRoom !== room) leaveOrder();
     socket.join(room);
+    if (!isAdmin) socket.join(room + ":user:" + userId);
     socket.currentOrderRoom = room;
     socket.currentOrderId = orderId;
 
@@ -218,12 +219,10 @@ async function handleConnection(socket) {
   // Leave order room
   socket.on("leave:order", () => {
     if (socket.currentOrderRoom) {
-      socket.leave(socket.currentOrderRoom);
       console.log(
         `[Socket.io] User ${userId} left room ${socket.currentOrderRoom}`,
       );
-      socket.currentOrderRoom = null;
-      socket.currentOrderId = null;
+      leaveOrder();
     }
   });
 
@@ -278,30 +277,8 @@ async function handleConnection(socket) {
       return;
     }
 
-    // Permission check (defense-in-depth)
-    const order = await Order.findById(orderId).select("userId").lean();
-    if (!order) {
-      pushSocketLog("SOCKET_SEND_FAIL", {
-        userId,
-        role: userRole,
-        orderId,
-        error: "ORDER_NOT_FOUND",
-      });
-      safeAck(ack, { ok: false, error: "ORDER_NOT_FOUND" });
-      return;
-    }
-    const orderOwnerId = String(order.userId);
-    const canSend = isAdmin || orderOwnerId === String(userId);
-    if (!canSend) {
-      pushSocketLog("SOCKET_SEND_FAIL", {
-        userId,
-        role: userRole,
-        orderId,
-        error: "FORBIDDEN",
-      });
-      safeAck(ack, { ok: false, error: "FORBIDDEN" });
-      return;
-    }
+    const order = await permittedOrder(orderId, "SOCKET_SEND_FAIL", ack);
+    if (!order) return;
 
     if (!messageText) {
       safeAck(ack, { ok: false, error: "MESSAGE_REQUIRED" });
@@ -351,17 +328,13 @@ async function handleConnection(socket) {
 
       safeAck(ack, { ok: true, message: payload });
 
-      // Broadcast to all in room (including sender)
-      const room = `order:${orderId}`;
-      io.to(room).emit("message:new", payload);
-
-      // Notify admins globally (only when a user sends a message)
-      if (senderRole === "user") {
-        io.to("admin:orders").emit("admin:order_message", {
-          orderId,
-          message: payload,
-        });
+      try {
+        await broadcastOrderMessage(order, payload);
+      } catch (err) {
+        console.warn("[CHAT_BROADCAST_FAIL]", err.name);
       }
+
+
     } catch (err) {
       pushSocketLog("SOCKET_SEND_FAIL", {
         userId,
@@ -385,6 +358,7 @@ async function handleConnection(socket) {
     if (!orderId || messageIds.length === 0) return;
 
     try {
+      if (!await permittedOrder(orderId, "SOCKET_RECEIPT_DENIED")) return;
       await OrderMessage.updateMany(
         {
           _id: { $in: messageIds },
@@ -412,6 +386,7 @@ async function handleConnection(socket) {
     if (!orderId || messageIds.length === 0) return;
 
     try {
+      if (!await permittedOrder(orderId, "SOCKET_RECEIPT_DENIED")) return;
       await OrderMessage.updateMany(
         {
           _id: { $in: messageIds },
@@ -491,6 +466,30 @@ function getIO() {
   return io;
 }
 
+async function broadcastOrderMessage(order, payload) {
+  if (!io) return;
+  const room = "order:" + order._id;
+  const listeners = new Set(io.sockets.adapter.rooms.get(room) || []);
+  if (payload.senderRole === "user") {
+    for (const id of io.sockets.adapter.rooms.get("admin:orders") || []) listeners.add(id);
+  }
+  const sockets = [...listeners].map(id => io.sockets.sockets.get(id)).filter(Boolean);
+  if (!sockets.length) return;
+  const accounts = await activeAccounts(sockets.map(socket => socket.user));
+  for (const socket of sockets) {
+    const account = accounts.get(String(socket.user.id));
+    if (!sessionIsCurrent(socket.user, account)) {
+      socket.disconnect(true);
+      continue;
+    }
+    const isAdmin = socket.user.role === "admin" && account.role === "admin";
+    if (socket.rooms.has(room) && !orderChatDenial(order, socket.user.id, isAdmin)) socket.emit("message:new", payload);
+    if (isAdmin && payload.senderRole === "user" && socket.rooms.has("admin:orders")) {
+      socket.emit("admin:order_message", { orderId: String(order._id), message: payload });
+    }
+  }
+}
+
 /**
  * Broadcast a message to an order room from external code (e.g., REST endpoint).
  */
@@ -534,6 +533,7 @@ function getSocketHealthSnapshot() {
 module.exports = {
   initSocket,
   getIO,
+  broadcastOrderMessage,
   broadcastToOrder,
   getSocketHealthSnapshot,
 };

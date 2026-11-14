@@ -1,6 +1,8 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const OrderMessage = require("../models/OrderMessage");
+const { activeAccounts, sessionIsCurrent } = require("../services/tokenIdentity");
+const { orderChatDenial } = require("../services/orderChatPolicy");
 
 // In-memory SSE subscribers: orderId -> Set(res)
 const subscribersByOrderId = new Map();
@@ -21,16 +23,25 @@ function removeSubscriber(orderId, res) {
   if (set.size === 0) subscribersByOrderId.delete(key);
 }
 
-function broadcastMessage(orderId, payload) {
-  const key = String(orderId);
+async function broadcastMessage(order, payload) {
+  const key = String(order._id);
   const set = subscribersByOrderId.get(key);
   if (!set || set.size === 0) return;
 
   const eventId = payload?._id ? String(payload._id) : String(Date.now());
   // Default event type is "message" when no `event:` line is provided.
   const data = `id: ${eventId}\ndata: ${JSON.stringify(payload)}\n\n`;
-  for (const res of Array.from(set)) {
+  const recipients = [...set];
+  const accounts = await activeAccounts(recipients.map(res => res.req.user));
+  for (const res of recipients) {
     try {
+      const user = res.req.user;
+      const account = accounts.get(String(user.id));
+      if (!sessionIsCurrent(user, account) || orderChatDenial(order, user.id, user.role === "admin" && account.role === "admin")) {
+        set.delete(res);
+        res.end();
+        continue;
+      }
       res.write(data);
     } catch (e) {
       // Best-effort cleanup
@@ -58,30 +69,20 @@ async function assertOrderAccess(req, res) {
   }
 
   const order = await Order.findById(id);
-  if (!order) {
+  const denial = orderChatDenial(order, req.user.id, req.user.role === "admin");
+  if (denial === "ORDER_NOT_FOUND") {
     res.status(404).json({ message: "Order not found" });
     return null;
   }
 
-  const isAdmin = req.user?.role === "admin";
-  const isOwner = String(order.userId) === String(req.user.id);
-  if (!isAdmin && !isOwner) {
+  if (denial === "FORBIDDEN") {
     res.status(403).json({ message: "Access denied" });
     return null;
   }
 
-  // PATCH_37: GUARDRAIL - Users can only chat on orders that are active
-  // Admins can always access chat for any order
-  if (!isAdmin) {
-    const activeStatuses = ["in_progress", "completed", "waiting_user"];
-    if (!activeStatuses.includes(order.status)) {
-      res.status(400).json({
-        message:
-          "Chat is only available for orders that are being processed. Please complete payment first.",
-        orderStatus: order.status,
-      });
-      return null;
-    }
+  if (denial === "CHAT_UNAVAILABLE") {
+    res.status(400).json({ message: "Order chat is unavailable for this status.", orderStatus: order.status });
+    return null;
   }
 
   return order;
@@ -249,24 +250,12 @@ exports.postOrderMessage = async (req, res) => {
       seenAt: created.seenAt || null,
     };
 
-    // Broadcast to all SSE subscribers for this order
-    broadcastMessage(order._id, payload);
-
-    // Best-effort Socket.IO broadcast (so REST fallback still updates realtime chat)
+    // The message is durable even if a live recipient cannot be revalidated.
     try {
-      const { getIO } = require("../socket");
-      const io = getIO();
-      if (io) {
-        io.to(`order:${String(order._id)}`).emit("message:new", payload);
-        if (senderRole === "user") {
-          io.to("admin:orders").emit("admin:order_message", {
-            orderId: String(order._id),
-            message: payload,
-          });
-        }
-      }
-    } catch {
-      // ignore broadcast errors
+      const { broadcastOrderMessage } = require("../socket");
+      await Promise.all([broadcastMessage(order, payload), broadcastOrderMessage(order, payload)]);
+    } catch (err) {
+      console.warn("[CHAT_BROADCAST_FAIL]", err.name);
     }
 
     return res.status(201).json(payload);

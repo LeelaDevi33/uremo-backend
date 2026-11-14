@@ -1,4 +1,6 @@
 const ApplyWork = require("../models/ApplyWork");
+const { randomUUID } = require("node:crypto");
+const { createRoleApplication, preflightApplication } = require("../services/opportunityApplications");
 const cloudinary = require("../config/cloudinary");
 const {
   inferResourceType,
@@ -6,6 +8,7 @@ const {
 } = require("../utils/cloudinaryUrl");
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
+const { reviewApplication } = require("../services/adminWorkRoles");
 
 const User = require("../models/User");
 const { sendEmail, getAdminEmails } = require("../services/email.service");
@@ -15,6 +18,7 @@ const {
 } = require("../emails/templates");
 
 exports.apply = async (req, res, next) => {
+  let pendingUpload = null;
   try {
     const positionIdRaw = String(req.body?.positionId || "").trim();
 
@@ -27,6 +31,9 @@ exports.apply = async (req, res, next) => {
       if (!position) {
         return res.status(400).json({ message: "Position not found" });
       }
+      // Reject closed roles before sending a resume to storage. Eligibility is
+      // checked again inside the application transaction in case a sale races the upload.
+      await preflightApplication(position, req.user.id);
     }
 
     const category = position
@@ -52,8 +59,7 @@ exports.apply = async (req, res, next) => {
           {
             resource_type: resourceType,
             folder: "uremo/resumes",
-            use_filename: true,
-            unique_filename: false,
+            public_id: randomUUID(),
           },
           (error, uploadResult) => {
             if (error) return reject(error);
@@ -72,15 +78,8 @@ exports.apply = async (req, res, next) => {
         resumeOriginalName: req.file.originalname,
         resumeMimeType: req.file.mimetype,
       };
+      pendingUpload = { id: result.public_id, type: result.resource_type };
     } else {
-      // Accept an already-uploaded resume URL.
-      try {
-        // eslint-disable-next-line no-new
-        new URL(resumeUrlRaw);
-      } catch {
-        return res.status(400).json({ message: "Invalid resumeUrl" });
-      }
-
       resumeDoc = {
         resumeUrl: resumeUrlRaw,
         resumeOriginalName: String(req.body?.resumeOriginalName || "").trim(),
@@ -88,7 +87,7 @@ exports.apply = async (req, res, next) => {
       };
     }
 
-    const application = await ApplyWork.create({
+    const application = await createRoleApplication({
       user: req.user.id,
       position: position ? position._id : undefined,
       positionTitle: position ? String(position.title || "").trim() : "",
@@ -96,6 +95,7 @@ exports.apply = async (req, res, next) => {
       ...resumeDoc,
       message: req.body.message,
     });
+    pendingUpload = null;
 
     // Email notifications (best-effort)
     try {
@@ -135,6 +135,13 @@ exports.apply = async (req, res, next) => {
 
     res.status(201).json(application);
   } catch (err) {
+    if (pendingUpload && !err.hasErrorLabel?.("UnknownTransactionCommitResult")) {
+      try {
+        await cloudinary.uploader.destroy(pendingUpload.id, { resource_type: pendingUpload.type });
+      } catch (cleanupError) {
+        console.error("[applyWork] resume cleanup failed", pendingUpload.id, cleanupError.name);
+      }
+    }
     next(err);
   }
 };
@@ -243,37 +250,7 @@ exports.updateStatus = async (req, res, next) => {
   try {
     const { status } = req.body;
 
-    // Get the application first
-    const app = await ApplyWork.findById(req.params.id);
-    if (!app) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Application not found" });
-    }
-
-    app.status = status;
-
-    // PATCH_57: If approving, update workerStatus based on screening availability
-    if (status === "approved") {
-      // Check if the position has screening
-      if (app.position) {
-        const WorkPosition = require("../models/WorkPosition");
-        const job = await WorkPosition.findById(app.position)
-          .select("hasScreening screeningId")
-          .lean();
-
-        if (job?.hasScreening && job?.screeningId) {
-          app.workerStatus = "screening_unlocked";
-        } else {
-          app.workerStatus = "ready_to_work";
-        }
-      } else {
-        // No position linked - default to ready_to_work
-        app.workerStatus = "ready_to_work";
-      }
-    }
-
-    await app.save();
+    const { applicant: app } = await reviewApplication(req.params.id, status, { adminId: req.user.id });
     res.json({ success: true, workerStatus: app.workerStatus });
   } catch (err) {
     next(err);
@@ -282,7 +259,16 @@ exports.updateStatus = async (req, res, next) => {
 
 exports.getMyApplication = async (req, res, next) => {
   try {
-    const app = await ApplyWork.findOne({ user: req.user.id })
+    res.set("Cache-Control", "private, no-store");
+    const filter = { user: req.user.id };
+    if (req.query.positionId !== undefined) {
+      if (!mongoose.isObjectIdOrHexString(req.query.positionId)) {
+        return res.status(400).json({ message: "Invalid positionId" });
+      }
+      filter.position = req.query.positionId;
+    }
+    const app = await ApplyWork.findOne(filter)
+      .sort({ createdAt: -1, _id: -1 })
       .populate("position", "_id title category active")
       .lean();
     if (!app) return res.json(null);

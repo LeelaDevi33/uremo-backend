@@ -1,3 +1,4 @@
+const { tokenIdentity } = require("../services/tokenIdentity");
 /**
  * JarvisX Routes - Core Brain Architecture
  *
@@ -14,6 +15,7 @@ const express = require("express");
 const router = express.Router();
 
 // Controllers
+const retiredCatalog = require("../middlewares/retiredCatalog");
 const JarvisX = require("../controllers/jarvisx.controller"); // Legacy
 const JarvisXCoreBrain = require("../controllers/jarvisxCoreBrain.controller"); // New
 
@@ -21,16 +23,13 @@ const JarvisXCoreBrain = require("../controllers/jarvisxCoreBrain.controller"); 
 const auth = require("../middlewares/auth.middleware");
 const admin = require("../middlewares/admin.middleware");
 const {
-  jarvisxLimiter,
-  chatLimiter,
   adminLimiter,
-  burstLimiter,
   requestLogger,
   securityHeaders,
 } = require("../middlewares/jarvisxRateLimiter");
 
 // Optional auth - attaches user if token present but doesn't require it
-const optionalAuth = (req, res, next) => {
+const optionalAuth = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1] || req.cookies?.token;
   if (!token) {
     return next();
@@ -39,7 +38,7 @@ const optionalAuth = (req, res, next) => {
   try {
     const jwt = require("jsonwebtoken");
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    req.user = await tokenIdentity(decoded);
   } catch (e) {
     // Invalid token - continue as guest
   }
@@ -53,17 +52,8 @@ const optionalAuth = (req, res, next) => {
 // Health check (no auth required)
 router.get("/health", JarvisXCoreBrain.health);
 
-// Main chat endpoint - goes through Core Brain
-router.post(
-  "/chat",
-  securityHeaders,
-  requestLogger,
-  jarvisxLimiter,
-  chatLimiter,
-  burstLimiter,
-  optionalAuth,
-  JarvisXCoreBrain.chat,
-);
+// The legacy assistant can create service requests and recommend retired listings.
+router.post("/chat", securityHeaders, requestLogger, adminLimiter, auth, admin, JarvisXCoreBrain.chat);
 
 // Session management
 router.get("/session", optionalAuth, JarvisXCoreBrain.getSession);
@@ -87,9 +77,9 @@ router.get("/admin/health", auth, admin, JarvisXCoreBrain.healthReport);
 // ============================================================
 // V1 ENDPOINTS (Legacy - Deprecated but kept for compatibility)
 // ============================================================
-router.get("/public-context", JarvisX.getPublicContext);
-router.post("/v1/chat", jarvisxLimiter, optionalAuth, JarvisX.chat);
-router.post("/request-service", optionalAuth, JarvisX.requestService);
+router.get("/public-context", retiredCatalog);
+router.post("/v1/chat", retiredCatalog);
+router.post("/request-service", retiredCatalog);
 
 // Admin endpoints (auth + admin required)
 router.get("/admin-context", auth, admin, JarvisX.getAdminContext);
@@ -98,8 +88,8 @@ router.get("/admin-context", auth, admin, JarvisX.getAdminContext);
 // V2 ENDPOINTS (Deprecated - Use Core Brain /chat instead)
 // ============================================================
 // Kept for backward compatibility during transition
-router.post("/v2/chat", jarvisxLimiter, optionalAuth, JarvisX.chatV2);
-router.post("/v2/action", optionalAuth, JarvisX.executeActionV2);
+router.post("/v2/chat", retiredCatalog);
+router.post("/v2/action", retiredCatalog);
 router.get("/v2/health", JarvisX.healthV2);
 
 module.exports = router;

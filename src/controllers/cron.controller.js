@@ -5,7 +5,8 @@ const { paymentPendingReminder } = require("../emails/templates");
 
 exports.paymentPendingReminders = async (req, res) => {
   try {
-    const secret = String(req.query?.secret || "");
+    const header = req.get("Authorization") || "";
+    const secret = /^Bearer /i.test(header) ? header.slice(7) : req.query?.secret;
     const expected =
       process.env.CRON_SECRET || process.env.CRON_PAYMENT_PENDING_SECRET || "";
 

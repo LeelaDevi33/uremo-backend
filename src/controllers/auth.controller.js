@@ -1,10 +1,10 @@
 const User = require("../models/User");
-const Service = require("../models/Service");
 const jwt = require("jsonwebtoken");
 const bcryptjs = require("bcryptjs");
 
 const { sendEmail } = require("../services/email.service");
 const { welcomeEmail } = require("../emails/templates");
+const { getFrontendUrl } = require("../config/frontendUrl");
 
 // PATCH_54: Standardized error codes
 const AUTH_ERRORS = {
@@ -157,7 +157,7 @@ exports.signup = async (req, res, next) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role, sessionVersion: user.sessionVersion || 0 },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -165,21 +165,14 @@ exports.signup = async (req, res, next) => {
     // Email is best-effort; never block signup on email failure.
     setImmediate(async () => {
       try {
-        const topServices = await Service.find({ active: { $ne: false } })
-          .select("title category price")
-          .sort({ createdAt: -1 })
-          .limit(3)
-          .lean();
-
         await sendEmail({
           to: user.email,
           subject: "Welcome to UREMO",
-          html: welcomeEmail(user.email, topServices),
+          html: welcomeEmail({ name: user.name }),
         });
       } catch (err) {
         console.error("[email] welcome failed", {
-          userEmail: user.email,
-          message: err?.message || String(err),
+          code: err?.code || "EMAIL_SEND_FAILED",
         });
       }
     });
@@ -209,13 +202,6 @@ exports.login = async (req, res) => {
   try {
     const { email, password } = req.body || {};
 
-    console.log("[LOGIN]", {
-      origin: req.headers.origin,
-      referer: req.headers.referer,
-      email: typeof email === "string" ? email.trim().toLowerCase() : undefined,
-      hasPassword: Boolean(password),
-    });
-
     // PATCH_54: Standardized error response
     if (!email || !password) {
       return res.status(400).json({
@@ -237,24 +223,16 @@ exports.login = async (req, res) => {
 
     const isMatch = await bcryptjs.compare(String(password), user.password);
     if (!isMatch) {
-      console.warn("[LOGIN_BAD_PASSWORD]", {
-        userId: String(user._id),
-        email: user.email,
-        passwordHashPrefix:
-          typeof user.password === "string" ? user.password.slice(0, 4) : null,
-      });
       // Legacy compatibility: if a user was seeded with plaintext password,
       // allow one successful login and upgrade to bcrypt.
       if (
         typeof user.password === "string" &&
+        !/^\$2[abxy]?\$/.test(user.password) &&
         user.password === String(password)
       ) {
-        user.password = String(password);
+        user.markModified("password");
         await user.save();
-        console.warn("[auth] upgraded legacy plaintext password", {
-          userId: String(user._id),
-          email: user.email,
-        });
+        console.info("[auth] upgraded legacy password storage");
       } else {
         return res.status(401).json({
           success: false,
@@ -274,7 +252,7 @@ exports.login = async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, email: user.email, role: user.role },
+      { id: user._id, email: user.email, role: user.role, sessionVersion: user.sessionVersion || 0 },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
@@ -375,8 +353,7 @@ exports.resetPasswordWithSecret = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    user.password = String(nextPassword);
-    await user.save();
+    if (!await changePassword({ _id: user._id }, String(nextPassword))) return res.status(404).json({ message: "User not found" });
 
     return res.json({
       message: "Password updated",
@@ -518,7 +495,7 @@ exports.forgotPassword = async (req, res) => {
 
     // Send reset email (best effort)
     try {
-      const resetUrl = `${process.env.FRONTEND_URL || "https://uremo.online"}/reset-password?token=${resetToken}`;
+      const resetUrl = `${getFrontendUrl()}/reset-password?token=${resetToken}`;
       await sendEmail({
         to: user.email,
         subject: "Password Reset Request - UREMO",
@@ -557,7 +534,7 @@ exports.resetPassword = async (req, res) => {
   try {
     const { token, password } = req.body;
 
-    if (!token || !password) {
+    if (typeof token !== "string" || !token || !password) {
       return res.status(400).json({
         success: false,
         code: "MISSING_FIELDS",
@@ -578,24 +555,20 @@ exports.resetPassword = async (req, res) => {
     const crypto = require("crypto");
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
-    const user = await User.findOne({
+    const filter = {
       passwordResetToken: tokenHash,
       passwordResetExpires: { $gt: new Date() },
-    });
+    };
 
-    if (!user) {
+    // Avoid password hashing for unrelated/expired tokens. The update rechecks
+    // the same single-use token so simultaneous requests cannot both succeed.
+    if (!await User.exists(filter) || !await changePassword(filter, password)) {
       return res.status(400).json({
         success: false,
         code: "INVALID_TOKEN",
         message: "Password reset link is invalid or has expired",
       });
     }
-
-    // Update password and clear reset fields
-    user.password = password;
-    user.passwordResetToken = undefined;
-    user.passwordResetExpires = undefined;
-    await user.save();
 
     res.json({
       success: true,
@@ -610,3 +583,14 @@ exports.resetPassword = async (req, res) => {
     });
   }
 };
+
+async function changePassword(filter, password) {
+  const hash = await bcryptjs.hash(password, 10);
+  if (filter.passwordResetExpires) filter.passwordResetExpires = { $gt: new Date() };
+  const result = await User.updateOne(filter, {
+    $set: { password: hash },
+    $unset: { passwordResetToken: "", passwordResetExpires: "" },
+    $inc: { sessionVersion: 1 },
+  });
+  return result.modifiedCount === 1;
+}

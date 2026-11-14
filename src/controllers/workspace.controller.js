@@ -5,10 +5,16 @@
  * PATCH_90: Hybrid rubric engine integration
  */
 const ApplyWork = require("../models/ApplyWork");
+const { createRoleApplication } = require("../services/opportunityApplications");
+const roleProjects = require("../services/roleProjects");
+const { roleError, revision, withRevision } = require("../services/adminWorkRoles");
 const Screening = require("../models/Screening");
 const Project = require("../models/Project");
 const User = require("../models/User");
 const WorkPosition = require("../models/WorkPosition");
+const screeningRules = require("../services/applicationScreenings");
+const { acquiredProjects } = require("../services/profileProjects");
+const { paidProjectAccess } = require("../services/paidProjectAccess");
 const {
   runAutoValidation,
   applyScreeningQualityImpact,
@@ -21,13 +27,13 @@ const {
  */
 exports.getWorkspaceProfile = async (req, res) => {
   try {
+    res.set("Cache-Control", "private, no-store");
     // PATCH_43: Get ALL job applications for the user (multi-job support)
     const applications = await ApplyWork.find({ user: req.user.id })
       .populate(
         "position",
         "_id title category description trainingMaterials hasScreening screeningId screeningIds",
       )
-      .populate("currentProject", "title status payRate payType")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -39,63 +45,22 @@ exports.getWorkspaceProfile = async (req, res) => {
       });
     }
 
-    // Enrich each application with screening/project info
+    const projects = await Project.find({ assignedTo: req.user.id, status: { $in: ["assigned", "in_progress", "completed"] } })
+      .select("title description payRate payType deadline status workPositionId earningsCredited completedAt").lean();
+    const states = await paidProjectAccess(null, projects.map(project => project._id));
+    const assignments = projects.filter(project => !states.get(String(project._id))?.required);
+
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
-        // Get screening for this position if exists
-        // PATCH_89: Support multiple screenings via screeningIds
-        let screening = null;
-        let requiredScreenings = [];
-
-        if (
-          app.position?.screeningIds &&
-          app.position.screeningIds.length > 0
-        ) {
-          // Multi-screening: load all required screenings
-          requiredScreenings = await Screening.find({
-            _id: { $in: app.position.screeningIds },
-          })
-            .select(
-              "title description timeLimit passingScore trainingMaterials",
-            )
-            .lean();
-          // Keep backward compat — first screening as primary
-          screening = requiredScreenings[0] || null;
-        } else if (app.position?.screeningId) {
-          screening = await Screening.findById(app.position.screeningId)
-            .select(
-              "title description timeLimit passingScore trainingMaterials",
-            )
-            .lean();
-          if (screening) requiredScreenings = [screening];
-        } else if (app.position?.category) {
-          // Fallback: find screening by category
-          screening = await Screening.findOne({
-            category: app.position.category,
-            active: true,
-          })
-            .select(
-              "title description timeLimit passingScore trainingMaterials",
-            )
-            .lean();
-          if (screening) requiredScreenings = [screening];
-        }
-
-        // Get assigned projects for this application
-        const assignedProjects = await Project.find({
-          assignedTo: req.user.id,
-          status: { $in: ["assigned", "in_progress"] },
-        })
-          .select("title description payRate payType deadline status")
-          .lean();
-
-        // Get completed projects
-        const completedProjects = await Project.find({
-          assignedTo: req.user.id,
-          status: "completed",
-        })
-          .select("title payRate earningsCredited completedAt")
-          .lean();
+        const trainingAvailable = app.status === "approved" && !["suspended", "inactive"].includes(app.workerStatus);
+        const requiredScreenings = trainingAvailable ? await screeningRules.requiredSummaries(app.position, app.category) : [];
+        const screening = requiredScreenings[0] || null;
+        const trainingMaterials = trainingAvailable ? app.position?.trainingMaterials || [] : [];
+        const roleProjects = assignments.filter(project => String(project.workPositionId || "") === String(app.position?._id || ""));
+        const assignedProjects = roleProjects.filter(p => p.status !== "completed")
+          .map(({ _id, title, description, payRate, payType, deadline, status }) => ({ _id, title, description, payRate, payType, deadline, status }));
+        const completedProjects = roleProjects.filter(p => p.status === "completed")
+          .map(({ _id, title, payRate, earningsCredited, completedAt }) => ({ _id, title, payRate, earningsCredited, completedAt }));
 
         // Normalize legacy worker status
         let normalizedStatus = app.workerStatus || "applied";
@@ -106,7 +71,7 @@ exports.getWorkspaceProfile = async (req, res) => {
 
         return {
           _id: app._id,
-          position: app.position,
+          position: app.position ? { ...app.position, trainingMaterials } : null,
           positionTitle: app.positionTitle || app.position?.title || "",
           category: app.category || app.position?.category || "",
           workerStatus: normalizedStatus,
@@ -118,7 +83,7 @@ exports.getWorkspaceProfile = async (req, res) => {
           payRate: app.payRate || 0,
           screening,
           requiredScreenings,
-          trainingMaterials: app.position?.trainingMaterials || [],
+          trainingMaterials,
           assignedProjects,
           completedProjects,
           screeningsCompleted: app.screeningsCompleted || [],
@@ -184,20 +149,7 @@ exports.applyToJob = async (req, res) => {
       return res.status(400).json({ message: "This position is not active" });
     }
 
-    // Check if already applied
-    const existing = await ApplyWork.findOne({
-      user: req.user.id,
-      position: jobId,
-    });
-
-    if (existing) {
-      return res
-        .status(400)
-        .json({ message: "Already applied to this position" });
-    }
-
-    // Create application
-    const application = await ApplyWork.create({
+    const application = await createRoleApplication({
       user: req.user.id,
       position: jobId,
       positionTitle: job.title,
@@ -214,7 +166,7 @@ exports.applyToJob = async (req, res) => {
       application,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message });
   }
 };
 
@@ -236,7 +188,7 @@ exports.markTrainingViewed = async (req, res) => {
     }
 
     // Only allow when status is screening_unlocked
-    if (application.workerStatus !== "screening_unlocked") {
+    if (application.status !== "approved" || !["screening_unlocked", "screening_available"].includes(application.workerStatus)) {
       return res.status(400).json({
         message:
           "Training can only be marked as viewed when screening is unlocked",
@@ -244,6 +196,7 @@ exports.markTrainingViewed = async (req, res) => {
     }
 
     // Update status to training_viewed
+    screeningRules.guardScreeningSave(application);
     application.workerStatus = "training_viewed";
     application.trainingViewedAt = new Date();
     await application.save();
@@ -255,7 +208,8 @@ exports.markTrainingViewed = async (req, res) => {
       workerStatus: application.workerStatus,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -265,31 +219,22 @@ exports.markTrainingViewed = async (req, res) => {
  */
 exports.getAvailableScreenings = async (req, res) => {
   try {
-    const profile = await ApplyWork.findOne({ user: req.user.id }).lean();
-    if (!profile) {
-      return res.json({ screenings: [] });
+    const profiles = await ApplyWork.find({
+      user: req.user.id, status: "approved", workerStatus: { $in: screeningRules.unlocked },
+    }).populate("position", screeningRules.roleFields);
+    const screenings = new Map();
+    for (const profile of profiles) {
+      if (!profile.position && profile.populated("position")) continue;
+      for (const screening of await screeningRules.requiredSummaries(profile.position, profile.category)) {
+        if (!screening.active) continue;
+        const id = String(screening._id);
+        const record = profile.screeningsCompleted.find(result => String(result.screeningId) === id && screeningRules.passedScreening(result));
+        if (!screenings.has(id) || record) screenings.set(id, {
+          ...screening, completed: Boolean(record), completedAt: record?.completedAt,
+        });
+      }
     }
-
-    const screenings = await Screening.find({
-      category: profile.category,
-      active: true,
-    })
-      .select("title description timeLimit passingScore trainingMaterials")
-      .lean();
-
-    // Mark completed ones
-    const completedIds = (profile.screeningsCompleted || []).map((s) =>
-      s.screeningId?.toString(),
-    );
-    const enriched = screenings.map((s) => ({
-      ...s,
-      completed: completedIds.includes(s._id.toString()),
-      completedAt: profile.screeningsCompleted?.find(
-        (sc) => sc.screeningId?.toString() === s._id.toString(),
-      )?.completedAt,
-    }));
-
-    res.json({ screenings: enriched });
+    res.json({ screenings: [...screenings.values()] });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -301,17 +246,15 @@ exports.getAvailableScreenings = async (req, res) => {
  */
 exports.getScreening = async (req, res) => {
   try {
-    const screening = await Screening.findById(req.params.id)
-      .select("-questions.correctAnswer -questions.correctAnswers") // Don't expose answers
-      .lean();
-
-    if (!screening) {
-      return res.status(404).json({ message: "Screening not found" });
-    }
-
+    if (!Screening.base.isObjectIdOrHexString(req.params.id)) return res.status(404).json({ message: "Screening not found" });
+    const screening = await Screening.findOne({ _id: req.params.id, active: true })
+      .select("-questions.correctAnswer -questions.correctAnswers").lean();
+    if (!screening) return res.status(404).json({ message: "Screening not found" });
+    await screeningRules.eligibleApplication(req.user.id, screening._id, req.query.positionId);
     res.json({ screening });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -323,45 +266,14 @@ exports.getScreening = async (req, res) => {
 exports.submitScreening = async (req, res) => {
   try {
     const { answers, positionId } = req.body;
-    const screening = await Screening.findById(req.params.id).lean();
-
-    if (!screening) {
-      return res.status(404).json({ message: "Screening not found" });
+    if (!Screening.base.isObjectIdOrHexString(req.params.id)) return res.status(404).json({ message: "Screening not found" });
+    const screening = await Screening.findOne({ _id: req.params.id, active: true }).lean();
+    if (!screening) return res.status(404).json({ message: "Screening not found" });
+    const { profile, ids } = await screeningRules.eligibleApplication(req.user.id, screening._id, positionId);
+    if (!Array.isArray(answers) || answers.length !== screening.questions.length || !answers.length) {
+      return res.status(400).json({ message: "Provide an answer entry for each screening question." });
     }
-
-    // PATCH_43 + PATCH_57: Find the correct worker profile (for multi-job support)
-    let profile;
-    if (positionId) {
-      profile = await ApplyWork.findOne({
-        _id: positionId,
-        user: req.user.id,
-      });
-      if (!profile) {
-        profile = await ApplyWork.findOne({
-          user: req.user.id,
-          position: positionId,
-        });
-      }
-    } else {
-      profile = await ApplyWork.findOne({ user: req.user.id });
-    }
-
-    if (!profile) {
-      return res.status(400).json({
-        message:
-          "No worker profile found. Please apply to a work position first.",
-        debug: { positionId, userId: req.user.id },
-      });
-    }
-
-    // PATCH_43 + PATCH_49: Check if worker is allowed to take screening
-    const allowedStatuses = ["screening_unlocked", "training_viewed"];
-    if (!allowedStatuses.includes(profile.workerStatus)) {
-      return res.status(400).json({
-        message: `Cannot take screening. Current status: ${profile.workerStatus}. Required: screening_unlocked or training_viewed.`,
-      });
-    }
-
+    screeningRules.guardScreeningSave(profile);
     // PATCH_90: Run hybrid auto-validation engine
     const {
       autoScore,
@@ -397,39 +309,13 @@ exports.submitScreening = async (req, res) => {
       answers: answers,
     };
 
-    // PATCH_90: Determine worker status based on evaluation mode
+    profile.screeningsCompleted.push(completionRecord);
+    const submission = profile.screeningsCompleted[profile.screeningsCompleted.length - 1];
     if (evaluationMode === "auto") {
-      // Pure auto: same as old behavior
-      completionRecord.passed = autoPass;
-      completionRecord.submissionStatus = autoPass ? "approved" : "auto_graded";
-
+      submission.passed = autoPass;
+      submission.submissionStatus = autoPass ? "approved" : "auto_graded";
       if (autoPass) {
-        // Check multi-screening requirement
-        const jobRole = await WorkPosition.findById(profile.position)
-          .select("screeningIds screeningId hasScreening")
-          .lean();
-        const requiredIds = (jobRole?.screeningIds || []).map((id) =>
-          id.toString(),
-        );
-
-        // Add current to completed list for checking
-        const allPassedIds = [
-          ...(profile.screeningsCompleted || [])
-            .filter((sc) => sc.passed !== false)
-            .map((sc) => sc.screeningId?.toString()),
-          screening._id.toString(),
-        ];
-
-        if (requiredIds.length > 1) {
-          const allPassed = requiredIds.every((rid) =>
-            allPassedIds.includes(rid),
-          );
-          profile.workerStatus = allPassed
-            ? "ready_to_work"
-            : "screening_unlocked";
-        } else {
-          profile.workerStatus = "ready_to_work";
-        }
+        profile.workerStatus = screeningRules.afterPassing(profile, ids);
 
         // PATCH_90: Apply quality score impact on auto-pass
         applyScreeningQualityImpact(profile, autoScore);
@@ -443,19 +329,17 @@ exports.submitScreening = async (req, res) => {
     } else {
       // hybrid or manual: DO NOT advance worker status
       // Leave as test_submitted → admin must review
-      completionRecord.passed = null; // pending admin decision
-      completionRecord.submissionStatus = "pending_review";
+      submission.passed = null;
+      submission.submissionStatus = "pending_review";
       profile.workerStatus = "test_submitted";
     }
-
-    profile.screeningsCompleted.push(completionRecord);
     await profile.save();
 
     // Build response message
     let message;
     if (evaluationMode === "auto") {
       if (autoPass) {
-        message = "Congratulations! You passed and are now ready to work.";
+        message = profile.workerStatus === "ready_to_work" ? "You passed all required screenings and are ready to work." : "You passed this screening. Complete the remaining role screenings.";
       } else if (profile.attemptCount < maxAttempts) {
         message = `You scored ${score}%. You have ${maxAttempts - profile.attemptCount} attempt(s) remaining.`;
       } else {
@@ -476,8 +360,8 @@ exports.submitScreening = async (req, res) => {
       autoScore,
       autoPass,
       evaluationMode,
-      submissionStatus: completionRecord.submissionStatus,
-      passed: completionRecord.passed,
+      submissionStatus: submission.submissionStatus,
+      passed: submission.passed,
       attemptsUsed: profile.attemptCount,
       attemptsRemaining: Math.max(0, maxAttempts - profile.attemptCount),
       newStatus: profile.workerStatus,
@@ -486,7 +370,8 @@ exports.submitScreening = async (req, res) => {
       message,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -502,7 +387,11 @@ exports.getMyProjects = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ projects });
+    const states = await paidProjectAccess(null, projects.map(p => p._id));
+    res.set("Cache-Control", "private, no-store").json({
+      projects: projects.filter(p => !states.get(String(p._id))?.required),
+      acquiredProjects: await acquiredProjects(req.user.id),
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -514,6 +403,14 @@ exports.getMyProjects = async (req, res) => {
  */
 exports.getProject = async (req, res) => {
   try {
+    if (!require("mongoose").isObjectIdOrHexString(req.params.id)) return res.status(404).json({ message: "Project not found" });
+    res.set("Cache-Control", "private, no-store");
+    const state = (await paidProjectAccess(req.user.id, [req.params.id])).get(req.params.id.toLowerCase());
+    if (state?.required) {
+      const records = state.active ? await acquiredProjects(req.user.id, req.params.id) : [];
+      if (!records.length) return res.status(404).json({ message: "No active project access in this profile." });
+      return res.json({ acquiredProject: records[0] });
+    }
     const project = await Project.findOne({
       _id: req.params.id,
       assignedTo: req.user.id,
@@ -540,29 +437,14 @@ exports.getProject = async (req, res) => {
  */
 exports.startProject = async (req, res) => {
   try {
-    const project = await Project.findOne({
-      _id: req.params.id,
-      assignedTo: req.user.id,
+    const project = await Project.db.transaction(async session => {
+      const record = await Project.findOneAndUpdate({ _id: req.params.id, assignedTo: req.user.id, status: "assigned" },
+        { $set: { status: "in_progress" } }, { session, new: true });
+      if (!record) return null;
+      await ApplyWork.updateOne({ user: req.user.id, currentProject: record._id }, { $set: { workerStatus: "working" } }, { session });
+      return record;
     });
-
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
-
-    if (project.status !== "assigned") {
-      return res
-        .status(400)
-        .json({ message: "Project already started or completed" });
-    }
-
-    project.status = "in_progress";
-    await project.save();
-
-    // Update worker status to working
-    await ApplyWork.updateOne(
-      { user: req.user.id, currentProject: project._id },
-      { workerStatus: "working" },
-    );
+    if (!project) return res.status(409).json({ message: "Only a project assigned to you can be started" });
 
     res.json({
       success: true,
@@ -580,25 +462,9 @@ exports.startProject = async (req, res) => {
  */
 exports.submitProject = async (req, res) => {
   try {
-    const { completionNotes } = req.body;
-
-    const project = await Project.findOne({
-      _id: req.params.id,
-      assignedTo: req.user.id,
-    });
-
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
-
-    if (project.status === "completed") {
-      return res.status(400).json({ message: "Project already completed" });
-    }
-
-    project.status = "completed";
-    project.completedAt = new Date();
-    project.completionNotes = completionNotes;
-    await project.save();
+    const project = await Project.findOneAndUpdate({ _id: req.params.id, assignedTo: req.user.id, status: { $in: ["assigned", "in_progress"] } },
+      { $set: { status: "completed", completedAt: new Date(), completionNotes: req.body.completionNotes } }, { new: true });
+    if (!project) return res.status(409).json({ message: "Only an active project assigned to you can be submitted" });
 
     res.json({
       success: true,
@@ -616,15 +482,9 @@ exports.submitProject = async (req, res) => {
  */
 exports.getEarnings = async (req, res) => {
   try {
-    const profile = await ApplyWork.findOne({ user: req.user.id }).lean();
-    if (!profile) {
-      return res.json({
-        totalEarnings: 0,
-        pendingEarnings: 0,
-        withdrawable: 0,
-        history: [],
-      });
-    }
+    const user = await User.findById(req.user.id).select("walletBalance withdrawable pendingWithdrawals lifetimeEarnings").lean();
+    const profile = await ApplyWork.findOne({ user: req.user.id }).select("payRate pendingEarnings totalEarnings").lean();
+    const { availableFunds } = require("../services/walletFunds");
 
     // Get completed projects with earnings
     const completedProjects = await Project.find({
@@ -637,10 +497,10 @@ exports.getEarnings = async (req, res) => {
       .lean();
 
     res.json({
-      totalEarnings: profile.totalEarnings || 0,
-      pendingEarnings: profile.pendingEarnings || 0,
-      withdrawable: profile.totalEarnings || 0,
-      payRate: profile.payRate || 0,
+      totalEarnings: Math.max(user?.lifetimeEarnings || 0, profile?.totalEarnings || 0),
+      pendingEarnings: profile?.pendingEarnings || 0,
+      withdrawable: user ? availableFunds(user).withdrawable : 0,
+      payRate: profile?.payRate || 0,
       history: completedProjects.map((p) => ({
         projectId: p._id,
         title: p.title,
@@ -657,48 +517,9 @@ exports.getEarnings = async (req, res) => {
  * POST /api/workspace/withdraw
  * Request earnings withdrawal
  */
-exports.requestWithdrawal = async (req, res) => {
-  try {
-    const { amount, method, details } = req.body;
-
-    // PATCH_96: Validate amount is a positive number
-    const withdrawAmount = parseFloat(amount);
-    if (!withdrawAmount || isNaN(withdrawAmount) || withdrawAmount <= 0) {
-      return res
-        .status(400)
-        .json({ message: "Valid positive amount required" });
-    }
-    if (withdrawAmount < 1) {
-      return res.status(400).json({ message: "Minimum withdrawal is $1.00" });
-    }
-
-    // PATCH_96: Atomic earnings deduction with balance guard
-    const profile = await ApplyWork.findOneAndUpdate(
-      { user: req.user.id, totalEarnings: { $gte: withdrawAmount } },
-      { $inc: { totalEarnings: -withdrawAmount } },
-      { new: true },
-    );
-    if (!profile) {
-      const existing = await ApplyWork.findOne({ user: req.user.id });
-      if (!existing)
-        return res.status(400).json({ message: "No worker profile found" });
-      return res.status(400).json({ message: "Insufficient earnings balance" });
-    }
-
-    // PATCH_96: Atomic wallet credit using $inc
-    await User.findByIdAndUpdate(req.user.id, {
-      $inc: { walletBalance: withdrawAmount },
-    });
-
-    res.json({
-      success: true,
-      message: `$${withdrawAmount.toFixed(2)} transferred to your wallet. You can withdraw from the Wallet page.`,
-      newEarningsBalance: profile.totalEarnings,
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
+// Project earnings are already credited to the wallet when awarded. Both
+// withdrawal entry points must reserve those same dollars for review.
+exports.requestWithdrawal = require("./wallet.controller").requestWithdrawal;
 
 // ============ ADMIN ENDPOINTS ============
 
@@ -872,26 +693,28 @@ exports.adminGetQualifiedWorkerCounts = async (req, res) => {
 exports.adminGetWorkerById = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const worker = await ApplyWork.findById(id)
-      .populate("user", "firstName lastName name email phone avatar createdAt")
-      .populate("position", "title category description payRate")
-      .lean();
+    if (!ApplyWork.base.isObjectIdOrHexString(id)) return res.status(404).json({ message: "Worker not found" });
+    // Older operator links used account IDs. The current link identifies a
+    // specific application even when the account has several specializations.
+    const detail = query => query.populate("user", "firstName lastName name email phone avatar createdAt")
+      .populate("position", "title category description payRate").lean();
+    const worker = await detail(ApplyWork.findById(id)) ||
+      await detail(ApplyWork.findOne({ user: id }).sort({ createdAt: -1, _id: -1 }));
 
     if (!worker) {
       return res.status(404).json({ message: "Worker not found" });
     }
 
     // Get all projects assigned to this worker
-    const projects = await Project.find({ assignedTo: worker.user?._id })
+    const projects = worker.user ? await Project.find({ assignedTo: worker.user._id })
       .sort({ createdAt: -1 })
-      .lean();
+      .lean() : [];
 
     // Get all applications for this user
-    const applications = await ApplyWork.find({ user: worker.user?._id })
+    const applications = worker.user ? await ApplyWork.find({ user: worker.user._id })
       .populate("position", "title category")
       .sort({ createdAt: -1 })
-      .lean();
+      .lean() : [worker];
 
     // Build activity log
     const activityLog = [];
@@ -1475,6 +1298,15 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
       });
     }
 
+    if (profile.status !== "approved" || !["test_submitted", "screening_unlocked", "training_viewed", "screening_available"].includes(profile.workerStatus)) {
+      return res.status(409).json({ message: "The application is no longer available for screening review." });
+    }
+    const role = profile.position ? await WorkPosition.findById(profile.position).select(screeningRules.roleFields).lean() : null;
+    const required = await screeningRules.requiredScreeningIds(role, profile.category);
+    if ((profile.position && !role) || !required.includes(String(submission.screeningId))) {
+      return res.status(409).json({ message: "This screening is no longer assigned to the application." });
+    }
+    screeningRules.guardScreeningSave(profile);
     submission.adminReviewedBy = req.user.id;
     submission.adminReviewedAt = new Date();
 
@@ -1496,32 +1328,7 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
         submission.autoScore || submission.score || 0,
       );
 
-      // Check if ALL required screenings passed
-      const jobRole = await WorkPosition.findById(profile.position)
-        .select("screeningIds screeningId hasScreening")
-        .lean();
-
-      const requiredIds = (jobRole?.screeningIds || []).map((id) =>
-        id.toString(),
-      );
-
-      const allPassedIds = (profile.screeningsCompleted || [])
-        .filter(
-          (sc) => sc.passed === true || sc.submissionStatus === "approved",
-        )
-        .map((sc) => sc.screeningId?.toString());
-
-      if (requiredIds.length > 1) {
-        const allPassed = requiredIds.every((rid) =>
-          allPassedIds.includes(rid),
-        );
-        profile.workerStatus = allPassed
-          ? "ready_to_work"
-          : "screening_unlocked";
-      } else {
-        profile.workerStatus = "ready_to_work";
-      }
-
+      profile.workerStatus = screeningRules.afterPassing(profile, required);
       if (profile.workerStatus === "ready_to_work") {
         profile.approvedBy = req.user.id;
         profile.approvedAt = new Date();
@@ -1572,7 +1379,8 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
       submissionStatus: submission.submissionStatus,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    const status = screeningRules.screeningErrorStatus(err);
+    res.status(status).json({ message: status === 409 ? "The screening changed. Refresh your application." : err.message });
   }
 };
 
@@ -1601,23 +1409,10 @@ exports.adminCreateProject = async (req, res) => {
       rewardPerTask, // PATCH_95: per-task reward
     } = req.body;
 
-    // PATCH_86: Validate job role if provided
-    let jobRole = null;
-    if (workPositionId) {
-      const WorkPosition = require("../models/WorkPosition");
-      jobRole = await WorkPosition.findById(workPositionId);
-      if (!jobRole) {
-        return res.status(400).json({
-          message: "Invalid Job Role ID",
-          hint: "Select a valid job role for this project",
-        });
-      }
-    }
-
-    const project = await Project.create({
+    const project = await roleProjects.createForRole({
       title,
       description,
-      category: jobRole?.category || category, // Use job role's category if available
+      category,
       instructions,
       deliverables,
       payRate: payRate || earnings || 0,
@@ -1626,7 +1421,7 @@ exports.adminCreateProject = async (req, res) => {
       deadline,
       status: "open",
       createdBy: req.user.id,
-      screeningId: jobRole?.screeningId || screeningId || undefined, // Inherit from job role
+      screeningId: screeningId || undefined,
       screeningIds: screeningIds || [], // PATCH_88: Multiple screenings
       workPositionId: workPositionId || undefined, // PATCH_86
       priority: priority || "medium",
@@ -1650,7 +1445,7 @@ exports.adminCreateProject = async (req, res) => {
 
     res.status(201).json({ success: true, project });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || (["CastError", "ValidationError"].includes(err.name) ? 400 : 500)).json({ message: err.message });
   }
 };
 
@@ -1677,7 +1472,8 @@ exports.adminGetProjects = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ projects });
+    const reserved = await paidProjectAccess(null, projects.map(p => p._id));
+    res.json({ projects: projects.map(p => ({ ...withRevision(p), marketplaceReserved: reserved.get(String(p._id))?.required === true })) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1694,140 +1490,9 @@ exports.adminAssignProject = async (req, res) => {
     const { logAdminAction } = require("../services/adminAudit.service");
     const { workerId } = req.body;
 
-    // Get project first to check category and job role
-    const project = await Project.findById(req.params.id).populate(
-      "workPositionId",
-      "screeningId hasScreening title",
-    );
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
-
-    // PATCH-64 GUARDRAIL: Check if project is already assigned
-    if (project.status === "assigned" && project.assignedTo) {
-      return res.status(400).json({
-        message: "Project is already assigned to another worker",
-        currentAssignee: project.assignedTo,
-        hint: "Unassign the current worker first",
-      });
-    }
-
-    // Verify worker exists and is ready
-    const worker = await ApplyWork.findById(workerId).populate(
-      "position",
-      "category screeningId hasScreening _id title",
-    );
-    if (!worker) {
-      return res.status(404).json({ message: "Worker not found" });
-    }
-
-    // PATCH-64 GUARDRAIL: Worker must be ready_to_work
-    if (
-      worker.workerStatus !== "ready_to_work" &&
-      worker.workerStatus !== "assigned"
-    ) {
-      return res.status(400).json({
-        message: "Worker is not ready to work",
-        currentStatus: worker.workerStatus,
-        hint: "Worker must complete screening and be marked as ready_to_work",
-      });
-    }
-
-    // PATCH_86: Enforce job role eligibility
-    if (project.workPositionId) {
-      const projectJobRoleId =
-        project.workPositionId._id?.toString() ||
-        project.workPositionId.toString();
-      const workerJobRoleId = worker.position?._id?.toString();
-
-      // Check worker is in the same job role
-      if (!workerJobRoleId || workerJobRoleId !== projectJobRoleId) {
-        return res.status(400).json({
-          message: "Worker is not eligible for this project",
-          reason: "Worker's job role does not match project's job role",
-          projectJobRole: project.workPositionId.title || projectJobRoleId,
-          workerJobRole: worker.position?.title || "None",
-          hint: "Only workers who applied for the same job role can be assigned",
-        });
-      }
-
-      // Check if job role requires screening and worker has passed it
-      const jobRole = project.workPositionId;
-      if (jobRole.hasScreening && jobRole.screeningId) {
-        const hasPassedScreening = worker.screeningsCompleted?.some(
-          (sc) => sc.screeningId?.toString() === jobRole.screeningId.toString(),
-        );
-
-        // Also check testsCompleted for legacy compatibility
-        const hasPassedTest = worker.testsCompleted?.some(
-          (tc) => tc.passed === true,
-        );
-
-        // If worker is ready_to_work, they must have passed (trust the status)
-        // Otherwise, require explicit proof
-        if (
-          !hasPassedScreening &&
-          !hasPassedTest &&
-          worker.workerStatus !== "ready_to_work"
-        ) {
-          return res.status(400).json({
-            message: "Worker has not passed required screening",
-            reason:
-              "This project requires workers who passed the job role's screening test",
-            hint: "Worker must complete and pass the screening test first",
-          });
-        }
-      }
-
-      // PATCH_89: Check project-level screeningIds
-      if (project.screeningIds && project.screeningIds.length > 0) {
-        const requiredProjectScreenings = project.screeningIds.map((sid) =>
-          sid.toString(),
-        );
-        const passedScreenings = (worker.screeningsCompleted || [])
-          .filter((sc) => sc.passed !== false)
-          .map((sc) => sc.screeningId?.toString());
-
-        const missingScreenings = requiredProjectScreenings.filter(
-          (rid) => !passedScreenings.includes(rid),
-        );
-
-        if (
-          missingScreenings.length > 0 &&
-          worker.workerStatus !== "ready_to_work"
-        ) {
-          return res.status(400).json({
-            message: "Worker has not passed all project-required screenings",
-            reason: `Missing ${missingScreenings.length} screening(s)`,
-            hint: "Worker must pass all screening tests linked to this project",
-          });
-        }
-      }
-    }
-
-    // PATCH-64 GUARDRAIL: Category matching (warning, not blocking)
-    const workerCategory = worker.category || worker.position?.category;
-    if (
-      workerCategory &&
-      project.category &&
-      workerCategory !== project.category
-    ) {
-      console.warn(
-        `[AUDIT] Category mismatch: Worker (${workerCategory}) assigned to project (${project.category}) by ${req.user?.email}`,
-      );
-    }
-
-    const previousStatus = project.status;
-
-    project.assignedTo = worker.user;
-    project.assignedAt = new Date();
-    project.status = "assigned";
-    await project.save();
-
-    // Update worker status
-    worker.workerStatus = "assigned";
-    worker.currentProject = project._id;
-    await worker.save();
+    const { project, worker } = await roleProjects.assign(req.params.id, workerId);
+    const previousStatus = "open";
+    const workerCategory = worker.category;
 
     // PATCH-64: Log admin action
     await logAdminAction({
@@ -1848,7 +1513,7 @@ exports.adminAssignProject = async (req, res) => {
 
     res.json({ success: true, project });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message });
   }
 };
 
@@ -1860,105 +1525,8 @@ exports.adminCreditEarnings = async (req, res) => {
   try {
     const { amount, rating } = req.body;
 
-    if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-      return res
-        .status(400)
-        .json({ message: "Valid positive amount required" });
-    }
-    const creditAmount = parseFloat(amount);
-
-    // PATCH_96: Atomic idempotency guard — only credit if not already credited
-    const project = await Project.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        status: "completed",
-        earningsCredited: { $in: [null, undefined, 0] },
-      },
-      {
-        $set: {
-          earningsCredited: creditAmount,
-          creditedAt: new Date(),
-          ...(rating ? { adminRating: rating } : {}),
-        },
-      },
-      { new: true },
-    );
-    if (!project) {
-      // Check why it failed
-      const existing = await Project.findById(req.params.id);
-      if (!existing)
-        return res.status(404).json({ message: "Project not found" });
-      if (existing.status !== "completed")
-        return res
-          .status(400)
-          .json({ message: "Project must be completed first" });
-      if (existing.earningsCredited > 0)
-        return res
-          .status(400)
-          .json({
-            message: "Earnings already credited for this project",
-            alreadyCredited: existing.earningsCredited,
-          });
-      return res.status(400).json({ message: "Cannot credit earnings" });
-    }
-
-    // PATCH_96: Atomic worker earnings update
-    const updateOps = {
-      $inc: { totalEarnings: creditAmount },
-      $push: {
-        projectsCompleted: {
-          projectId: project._id,
-          completedAt: project.completedAt,
-          rating,
-          earnings: creditAmount,
-        },
-      },
-    };
-    const worker = await ApplyWork.findOne({ user: project.assignedTo });
-    if (worker) {
-      if (worker.currentProject?.toString() === project._id.toString()) {
-        updateOps.$set = {
-          currentProject: null,
-          workerStatus: "ready_to_work",
-        };
-      }
-      await ApplyWork.findOneAndUpdate({ user: project.assignedTo }, updateOps);
-    }
-
-    // PATCH_96: Atomic wallet credit using $inc
-    // PATCH_110: Also credit withdrawable, lifetimeEarnings, and create Transaction
-    const userBefore = await User.findById(project.assignedTo).select(
-      "walletBalance",
-    );
-    const balanceBefore = userBefore?.walletBalance || 0;
-
-    const updatedUser = await User.findByIdAndUpdate(
-      project.assignedTo,
-      {
-        $inc: {
-          walletBalance: creditAmount,
-          withdrawable: creditAmount,
-          lifetimeEarnings: creditAmount,
-        },
-        $set: { lastWalletUpdate: new Date() },
-      },
-      { new: true },
-    );
-
-    // PATCH_110: Create earning transaction for ledger
-    const WalletTransaction = require("../models/WalletTransaction");
-    await WalletTransaction.create({
-      user: project.assignedTo,
-      type: "credit",
-      amount: creditAmount,
-      source: "earning",
-      status: "success",
-      provider: "internal",
-      referenceId: project._id,
-      description: `Earnings for project: ${project.title || project._id.toString().slice(-6)}`,
-      balanceBefore,
-      balanceAfter: updatedUser?.walletBalance || balanceBefore + creditAmount,
-    });
+    const creditAmount = typeof amount === "string" ? Number(amount) : amount;
+    const project = await roleProjects.creditCompleted(req.params.id, creditAmount, rating);
 
     res.json({
       success: true,
@@ -1966,7 +1534,7 @@ exports.adminCreditEarnings = async (req, res) => {
       project,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message });
   }
 };
 
@@ -2034,45 +1602,45 @@ exports.adminAssignTask = async (req, res) => {
  */
 exports.adminGetProjectById = async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id)
-      .populate("assignedTo", "name email workerStatus")
-      .populate("createdBy", "firstName lastName email")
-      .populate("screeningId", "title passingScore timeLimit")
-      .populate("screeningIds", "title passingScore timeLimit")
-      .populate(
-        "datasetId",
-        "name datasetType difficultyLevel minJustificationWords minWordCount allowMultiResponseComparison isActive",
-      ) // PATCH_95
-      .lean();
+    if (!Project.base.isObjectIdOrHexString(req.params.id)) return res.status(400).json({ message: "Invalid project ID" });
+    const project = await Project.findById(req.params.id).lean();
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
+    // Capture the stored IDs before population. A deleted role must not make
+    // an unrelated application for the same person appear to own this work.
+    const owner = project.assignedTo, role = project.workPositionId;
+    const identity = "name firstName lastName email";
+    const roleFields = "title category active";
+    await Project.populate(project, [
+      { path: "workPositionId", select: roleFields },
+      { path: "assignedTo", select: identity }, { path: "createdBy", select: identity },
+      { path: "screeningId", select: "title passingScore timeLimit" }, { path: "screeningIds", select: "title passingScore timeLimit" },
+      { path: "datasetId", select: "name datasetType difficultyLevel minJustificationWords minWordCount allowMultiResponseComparison isActive" },
+    ]);
 
-    // Get worker profile if assigned
     let workerProfile = null;
-    if (project.assignedTo) {
-      workerProfile = await ApplyWork.findOne({ user: project.assignedTo._id })
-        .populate("user", "firstName lastName email")
-        .populate("position", "name category")
-        .lean();
+    if (owner) {
+      const filter = { user: owner, ...(role ? { position: role } : {}) };
+      const exact = await ApplyWork.findOne({ ...filter, $or: [{ currentProject: project._id }, { "projectsCompleted.projectId": project._id }] })
+        .sort({ updatedAt: -1 }).lean();
+      if (exact) workerProfile = exact;
+      else {
+        const candidates = await ApplyWork.find(filter).limit(2).lean();
+        if (candidates.length === 1) workerProfile = candidates[0];
+      }
+      if (workerProfile) await ApplyWork.populate(workerProfile, [
+        { path: "user", select: identity }, { path: "position", select: roleFields },
+      ]);
     }
-
-    // Get proofs for this project
     const ProofOfWork = require("../models/ProofOfWork");
-    let proofs = [];
-    try {
-      proofs = await ProofOfWork.find({ projectId: req.params.id })
-        .populate("workerId", "firstName lastName email name")
-        .sort({ createdAt: -1 })
-        .lean();
-    } catch (proofErr) {
-      console.warn("[WORKSPACE] Failed to fetch proofs:", proofErr.message);
-    }
+    const proofs = await ProofOfWork.find({ projectId: project._id })
+      .populate("workerId", identity).populate("jobRoleId", roleFields).populate("reviewedBy", identity)
+      .sort({ createdAt: -1 }).lean();
+    project.marketplaceReserved = (await paidProjectAccess(null, [project._id])).get(String(project._id))?.required === true;
 
     res.json({
       success: true,
-      project,
+      project: withRevision(project),
       workerProfile,
       proofs,
     });
@@ -2098,6 +1666,7 @@ exports.adminUpdateProject = async (req, res) => {
       estimatedTasks,
       deadline,
       status,
+      priority,
       screeningId,
       screeningIds, // PATCH_88: Multiple screenings
       projectType, // PATCH_95
@@ -2105,52 +1674,43 @@ exports.adminUpdateProject = async (req, res) => {
       rewardPerTask, // PATCH_95
     } = req.body;
 
-    const project = await Project.findById(req.params.id);
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
-
-    // Update allowed fields
-    if (title) project.title = title;
-    if (description) project.description = description;
-    if (category) project.category = category;
-    if (instructions) project.instructions = instructions;
-    if (deliverables) project.deliverables = deliverables;
-    if (payRate !== undefined) project.payRate = payRate;
-    if (payType) project.payType = payType;
-    if (estimatedTasks !== undefined) project.estimatedTasks = estimatedTasks;
-    if (deadline) project.deadline = deadline;
-    if (status) project.status = status;
-    if (screeningId !== undefined) project.screeningId = screeningId;
-    if (screeningIds !== undefined) project.screeningIds = screeningIds; // PATCH_88
-    // PATCH_95: RLHF fields
-    if (projectType !== undefined) project.projectType = projectType;
-    if (datasetId !== undefined) project.datasetId = datasetId || null;
-    if (rewardPerTask !== undefined) project.rewardPerTask = rewardPerTask;
-
-    project.updatedAt = new Date();
-    await project.save();
-
-    // Log admin action
-    try {
-      const { logAdminAction } = require("../services/adminAudit.service");
-      await logAdminAction(
-        req.user.id,
-        "PROJECT_UPDATED",
-        `Updated project: ${project.title}`,
-        { projectId: project._id, changes: req.body },
-      );
-    } catch (logErr) {
-      console.warn("[WORKSPACE] Audit log failed:", logErr.message);
-    }
+    const project = await Project.db.transaction(async session => {
+      const record = await projectForEdit(req, session);
+      if (category !== undefined && (typeof category !== "string" || !category.trim() || category.trim().length > 48)) {
+        throw roleError(400, "A project category of 1 to 48 characters is required");
+      }
+      if (status !== undefined && status !== record.status) {
+        const openInventory = ["draft", "open"].includes(record.status) && !record.assignedTo;
+        const cancelAssignment = ["assigned", "in_progress"].includes(record.status) && status === "cancelled";
+        if (!(openInventory && ["draft", "open", "cancelled"].includes(status)) && !cancelAssignment) {
+          throw roleError(409, "Use the assignment or completion workflow for this project");
+        }
+        if (cancelAssignment) await ApplyWork.updateOne({ user: record.assignedTo, currentProject: record._id },
+          { $set: { currentProject: null, workerStatus: "ready_to_work" } }, { session });
+      }
+      const previousState = { status: record.status, payRate: record.payRate, payType: record.payType, priority: record.priority };
+      const changes = { title, description, category, instructions, deliverables, payRate, payType, estimatedTasks,
+        deadline: deadline === "" ? null : deadline, status, priority, screeningId: screeningId === "" ? null : screeningId,
+        screeningIds, projectType, datasetId: datasetId === "" ? null : datasetId, rewardPerTask };
+      for (const [key, value] of Object.entries(changes)) if (value !== undefined) record.set(key, value);
+      record.updatedAt = new Date(Math.max(Date.now(), Date.parse(revision(record)) + 1));
+      await record.save({ session, timestamps: false });
+      await require("../services/adminAudit.service").logAdminAction({
+        adminId: req.user.id, adminEmail: req.user.email, action: "project_update", entityType: "project",
+        entityId: String(record._id), previousState,
+        newState: { status: record.status, payRate: record.payRate, payType: record.payType, priority: record.priority },
+        metadata: { fields: Object.keys(changes).filter(k => changes[k] !== undefined) },
+      }, { session, required: true });
+      return record;
+    });
 
     res.json({
       success: true,
       message: "Project updated successfully",
-      project,
+      project: withRevision(project),
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || (err.name === "ValidationError" ? 400 : 500)).json({ message: err.message, code: err.code });
   }
 };
 
@@ -2160,49 +1720,39 @@ exports.adminUpdateProject = async (req, res) => {
  */
 exports.adminDeleteProject = async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
-    if (!project) {
-      return res.status(404).json({ message: "Project not found" });
-    }
-
-    // GUARDRAIL: Cannot delete assigned or completed projects
-    if (project.status === "assigned" || project.status === "in_progress") {
-      return res.status(400).json({
-        message: "Cannot delete an active project",
-        hint: "Unassign the worker first or mark as cancelled",
-      });
-    }
-
-    if (project.status === "completed") {
-      return res.status(400).json({
-        message: "Cannot delete a completed project",
-        hint: "Completed projects are kept for records",
-      });
-    }
-
-    await Project.findByIdAndDelete(req.params.id);
-
-    // Log admin action
-    try {
-      const { logAdminAction } = require("../services/adminAudit.service");
-      await logAdminAction(
-        req.user.id,
-        "PROJECT_DELETED",
-        `Deleted project: ${project.title}`,
-        { projectId: project._id },
-      );
-    } catch (logErr) {
-      console.warn("[WORKSPACE] Audit log failed:", logErr.message);
-    }
+    await Project.db.transaction(async session => {
+      const project = await projectForEdit(req, session);
+      if (["assigned", "in_progress", "completed"].includes(project.status)) {
+        throw roleError(400, "Assigned and completed projects are kept for history");
+      }
+      const access = (await paidProjectAccess(null, [project._id], { session })).get(String(project._id));
+      if (access?.required) throw roleError(409, "A project linked to a marketplace offer must be kept for its access records.");
+      const removed = await Project.findOneAndDelete({ _id: req.params.id, status: { $in: ["draft", "open", "cancelled"] }, assignedTo: null }, { session });
+      if (!removed) throw roleError(409, "Assigned or completed projects are kept for history");
+      await require("../services/adminAudit.service").logAdminAction({ adminId: req.user.id, adminEmail: req.user.email,
+        action: "project_delete", entityType: "project", entityId: String(removed._id), previousState: { title: removed.title, status: removed.status },
+      }, { session, required: true });
+    });
 
     res.json({
       success: true,
       message: "Project deleted successfully",
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message, code: err.code });
   }
 };
+
+async function projectForEdit(req, session) {
+  if (!Project.base.isObjectIdOrHexString(req.params.id)) throw roleError(400, "Invalid project ID");
+  const project = await Project.findById(req.params.id).session(session);
+  if (!project) throw roleError(404, "Project not found");
+  const expected = req.body?.expectedRevision;
+  if (expected !== revision(project)) {
+    throw Object.assign(roleError(expected === undefined ? 428 : 409, "Reload this project before saving or deleting it."), { code: "STALE_PROJECT" });
+  }
+  return project;
+}
 
 /**
  * PATCH_86: GET /api/admin/workspace/project/:id/eligible-workers
@@ -2228,82 +1778,14 @@ exports.adminGetEligibleWorkers = async (req, res) => {
       return res.status(404).json({ message: "Project not found" });
     }
 
-    // PATCH_92: Debug log for eligibility filtering
-    console.log(
-      `[EligibleWorkers] Project: ${project.title} (${project._id}), JobRole: ${project.workPositionId?.title}, hasScreening: ${project.workPositionId?.hasScreening}`,
-    );
-
-    // Build worker filter
-    const workerFilter = {
-      workerStatus: { $in: ["ready_to_work", "assigned"] },
-    };
-
-    // If project has a job role, filter to workers with that job role
-    if (project.workPositionId) {
-      workerFilter.position = project.workPositionId._id;
-    }
-
-    // Get workers that match the filter
-    const workers = await ApplyWork.find(workerFilter)
-      .populate("user", "name email firstName lastName")
-      .populate("position", "title category")
-      .select(
-        "user position workerStatus screeningsCompleted testsCompleted totalEarnings",
-      )
-      .lean();
-
-    // PATCH_92: Debug log worker count and statuses
-    console.log(
-      `[EligibleWorkers] Found ${workers.length} workers matching filter. Statuses: ${workers.map((w) => `${w.user?.email || w._id}=${w.workerStatus}`).join(", ")}`,
-    );
-
-    // Additional filter: If job role requires screening, only return workers who passed
-    let eligibleWorkers = workers;
-
-    if (
-      project.workPositionId?.hasScreening &&
-      project.workPositionId?.screeningId
-    ) {
-      const requiredScreeningId = project.workPositionId.screeningId.toString();
-
-      eligibleWorkers = workers.filter((w) => {
-        // Check if worker passed the required screening
-        const hasPassedScreening = w.screeningsCompleted?.some(
-          (sc) => sc.screeningId?.toString() === requiredScreeningId,
-        );
-        const hasPassedTest = w.testsCompleted?.some(
-          (tc) => tc.passed === true,
-        );
-
-        // Workers with ready_to_work status are considered eligible
-        return (
-          hasPassedScreening ||
-          hasPassedTest ||
-          w.workerStatus === "ready_to_work"
-        );
-      });
-    }
-
-    // PATCH_89: Also check project-level screeningIds
-    if (project.screeningIds && project.screeningIds.length > 0) {
-      const requiredProjectScreenings = project.screeningIds.map((sid) =>
-        sid.toString(),
-      );
-      eligibleWorkers = eligibleWorkers.filter((w) => {
-        if (w.workerStatus === "ready_to_work") return true; // Trust status
-        const passedIds = (w.screeningsCompleted || [])
-          .filter((sc) => sc.passed !== false)
-          .map((sc) => sc.screeningId?.toString());
-        return requiredProjectScreenings.every((rid) =>
-          passedIds.includes(rid),
-        );
-      });
-    }
-
-    // PATCH_92: Debug log final eligible count
-    console.log(
-      `[EligibleWorkers] After filtering: ${eligibleWorkers.length} eligible workers`,
-    );
+    const workerFilter = { status: "approved", workerStatus: "ready_to_work", currentProject: null };
+    if (project.workPositionId) workerFilter.position = project.workPositionId._id;
+    const workers = project.status === "open" && !project.assignedTo ?
+      await ApplyWork.find(workerFilter)
+        .populate("user", "name email firstName lastName")
+        .populate("position", "title category screeningId screeningIds hasScreening")
+        .select("user position workerStatus screeningsCompleted totalEarnings").lean() : [];
+    const eligibleWorkers = workers.filter(worker => roleProjects.meetsScreenings(worker, project, worker.position));
 
     res.json({
       success: true,

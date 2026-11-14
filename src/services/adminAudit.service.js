@@ -11,6 +11,7 @@
  */
 
 const AdminAuditLog = require("../models/AdminAuditLog");
+const User = require("../models/User");
 
 /**
  * Log an admin action
@@ -35,11 +36,12 @@ async function logAdminAction({
   newState,
   reason,
   metadata,
-}) {
+}, { session, required = false } = {}) {
   try {
-    await AdminAuditLog.create({
+    const actorEmail = adminEmail || (await User.findById(adminId).select("email").session(session || null).lean())?.email;
+    await new AdminAuditLog({
       adminId,
-      adminEmail,
+      adminEmail: actorEmail,
       action,
       entityType,
       entityId,
@@ -48,8 +50,9 @@ async function logAdminAction({
       reason,
       metadata,
       timestamp: new Date(),
-    });
+    }).save({ session });
   } catch (err) {
+    if (required) throw err;
     // Log to console but don't fail the action
     console.error("[AdminAudit] Failed to log action:", {
       action,

@@ -3,6 +3,7 @@ const Service = require("../models/Service");
 const User = require("../models/User");
 const OrderMessage = require("../models/OrderMessage");
 const mongoose = require("mongoose");
+const { canReadRentalAccess } = require("../utils/rentalAccess");
 
 // PATCH_38: Action rules enforcement
 const {
@@ -54,6 +55,8 @@ exports.createOrder = async (req, res) => {
       serviceId: req.body.serviceId,
       status: "pending",
       orderType: "buy",
+      quotedAmount: service.price,
+      quotedCurrency: service.currency || "USD",
       reminderSent: false,
       payment: null,
       paidAt: null,
@@ -142,6 +145,8 @@ exports.createDealOrder = async (req, res) => {
       serviceId,
       status: "pending",
       orderType: "deal",
+      quotedAmount: service.price,
+      quotedCurrency: service.currency || "USD",
       dealPercent: pct,
       notes: `Deal: ${pct}% - ${service.title}`,
       reminderSent: false,
@@ -174,7 +179,8 @@ exports.myOrders = async (req, res) => {
     // PATCH_39: Ensure userId extraction works with both id and _id
     const userId = req.user.id || req.user._id;
     const orders = await Order.find({ userId })
-      .populate("serviceId", "title price category imageUrl")
+      .populate("serviceId", "title price currency category imageUrl")
+      .populate("rentalId", "price currency")
       .populate("payment.methodId", "name type")
       .sort({ createdAt: -1 })
       .lean();
@@ -244,16 +250,16 @@ exports.getOrderById = async (req, res) => {
     }
 
     const order = await Order.findById(id)
-      .populate("serviceId", "title price")
+      .populate("serviceId", "title price currency")
       .populate("payment.methodId")
-      .populate("rentalId", "rentalType duration price startDate endDate status daysRemaining accessDetails");
+      .populate("rentalId", "rentalType duration price currency startDate endDate status daysRemaining accessDetails user order activatedAt cancelledAt expiredAt statusLog");
 
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
 
     // User can only view their own orders (admins can view any)
-    const isAdmin = req.user?.role === "admin";
+    const isAdmin = req.user?.role === "admin" && await User.exists({ _id: req.user.id, role: "admin" });
     if (!isAdmin && order.userId.toString() !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -272,7 +278,23 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    res.json(order);
+    const result = order.toObject();
+    if (result.rentalId) {
+      const rental = result.rentalId;
+      if (!isAdmin && (String(rental.user) !== String(req.user.id) || String(rental.order) !== String(order._id))) {
+        result.rentalId = null;
+      } else {
+        if (!isAdmin && !canReadRentalAccess(rental, order, req.user.id)) delete rental.accessDetails;
+        // These fields were only selected to verify access.
+        delete rental.user;
+        delete rental.order;
+        delete rental.activatedAt;
+        delete rental.cancelledAt;
+        delete rental.expiredAt;
+        delete rental.statusLog;
+      }
+    }
+    res.set("Cache-Control", "private, no-store").json(result);
   } catch (err) {
     if (err?.name === "CastError") {
       return res.status(404).json({ message: "Order not found" });

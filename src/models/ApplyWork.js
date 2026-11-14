@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
  */
 const applyWorkSchema = new mongoose.Schema(
   {
+    paidOfferRevision: { type: Number, default: 0, select: false },
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

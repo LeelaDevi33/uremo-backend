@@ -1,10 +1,8 @@
 const express = require("express");
 const multer = require("multer");
 const auth = require("../middlewares/auth.middleware");
-const upload = require("../utils/upload");
 const {
   uploadPaymentProof,
-  uploadProofs,
   uploadPayment,
   uploadChatAttachment,
   uploadChatAttachments,
@@ -81,14 +79,8 @@ router.post(
   uploadPayment,
 );
 
-router.post(
-  "/",
-  auth,
-  upload.fields([
-    { name: "paymentProof", maxCount: 1 },
-    { name: "senderKyc", maxCount: 1 },
-  ]),
-  uploadProofs,
-);
+router.post("/", auth, (_req, res) => res.status(410).json({
+  message: "For an existing order, upload its proof at /api/upload/payment-proof and submit it on the order payment page.",
+}));
 
 module.exports = router;

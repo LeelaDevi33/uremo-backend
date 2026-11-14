@@ -18,5 +18,6 @@ router.get("/", blogsController.getPublicBlogs);
 
 // GET /api/blogs/:slug - Get single blog by slug
 router.get("/:slug", blogsController.getBlogBySlug);
+router.post("/:slug/view", blogsController.recordView);
 
 module.exports = router;

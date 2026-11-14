@@ -1,0 +1,52 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Marketplace regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UREMO_TEST_MONGO_PORT: "27017"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build
+      - name: Start a disposable MongoDB replica and prepare backup tools
+        run: |
+          docker run --detach --name uremo-ci-mongo --publish 127.0.0.1:27017:27017 \
+            mongo:8.0@sha256:d97fea17ccb8d004cd137be8dab54d70d0df11be69c9f422aefe4484c8414ab7 \
+            --replSet uremoCI --bind_ip_all
+          for attempt in {1..30}; do
+            if docker exec uremo-ci-mongo mongosh --quiet --eval 'db.adminCommand({ping: 1})' >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec uremo-ci-mongo mongosh --quiet --eval \
+            'rs.initiate({_id: "uremoCI", members: [{_id: 0, host: "127.0.0.1:27017"}]})'
+          docker exec uremo-ci-mongo mongosh --quiet --eval \
+            'for (let n=0; n<60; n++) { if (db.hello().isWritablePrimary) quit(0); sleep(1000); } quit(1);'
+          mkdir -p "$RUNNER_TEMP/mongo-tools"
+          for tool in mongodump mongorestore; do
+            docker cp "uremo-ci-mongo:/usr/bin/$tool" "$RUNNER_TEMP/mongo-tools/$tool"
+            "$RUNNER_TEMP/mongo-tools/$tool" --version
+          done
+          echo "UREMO_MONGO_TOOLS_DIR=$RUNNER_TEMP/mongo-tools" >> "$GITHUB_ENV"
+      - name: Run every node:test suite against the local replica
+        run: |
+          mapfile -t suites < <(grep -l 'node:test' scripts/test-*.js)
+          test "${#suites[@]}" -gt 0
+          node --test --test-concurrency=2 "${suites[@]}"

@@ -178,16 +178,12 @@ exports.replyTicketAdmin = async (req, res) => {
       lastMessageAt: new Date(),
       hasUnreadAdmin: false,
       hasUnreadUser: true,
-      status: ticket.status === "open" ? "in_progress" : ticket.status,
+      status: { $cond: [{ $eq: ["$status", "open"] }, "in_progress", "$status"] },
+      firstResponseAt: { $ifNull: ["$firstResponseAt", "$$NOW"] },
     };
 
     // Track first admin response for SLA
-    if (!ticket.firstResponseAt) {
-      updateData.firstResponseAt = new Date();
-    }
-
-    // Update ticket
-    await Ticket.findByIdAndUpdate(req.params.id, updateData);
+    const updated = await Ticket.findByIdAndUpdate(req.params.id, [{ $set: updateData }], { new: true, updatePipeline: true }).select("status");
 
     // PATCH_29: Send notification to user about admin reply
     try {
@@ -203,7 +199,7 @@ exports.replyTicketAdmin = async (req, res) => {
       console.error("[notification] admin reply failed:", notifErr.message);
     }
 
-    res.json({ ok: true, message: msg });
+    res.json({ ok: true, message: msg, status: updated.status });
   } catch (err) {
     console.error("replyTicketAdmin error:", err);
     res.status(500).json({ message: err.message });

@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const engagementService = require("../services/engagement.service");
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("../middlewares/rateLimit");
 const adminMiddleware = require("../middlewares/admin.middleware");
 
 const logger = {
@@ -21,7 +21,7 @@ const campaignLimiter = rateLimit({
 
 const MAX_CAMPAIGN_TITLE = 500;
 const MAX_CAMPAIGN_MESSAGE = 5000;
-const VALID_INTERESTS = ["microjobs", "forex", "wallets", "crypto", "rentals"];
+const VALID_INTERESTS = ["microjobs", "rentals", "project_purchase"];
 
 /**
  * PATCH_53: Admin Campaign Routes

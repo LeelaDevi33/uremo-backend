@@ -5,7 +5,7 @@
 
 const User = require("../models/User");
 const Order = require("../models/Order");
-const WalletTransaction = require("../models/WalletTransaction");
+const { projectRevenue, legacyRevenue, walletFunding } = require("../services/revenueReporting");
 const Ticket = require("../models/Ticket");
 const Rental = require("../models/Rental");
 const AffiliateCommission = require("../models/AffiliateCommission");
@@ -24,8 +24,9 @@ exports.getAdminAnalytics = async (req, res) => {
       completedOrders,
       processingOrders,
       pendingOrders,
-      revenueAgg,
-      walletAgg,
+      marketplace,
+      legacy,
+      funding,
       pendingTickets,
       openTickets,
       activeRentals,
@@ -40,28 +41,9 @@ exports.getAdminAnalytics = async (req, res) => {
       Order.countDocuments({ status: "completed" }),
       Order.countDocuments({ status: "in_progress" }),
       Order.countDocuments({ status: "pending" }),
-      Order.aggregate([
-        { $match: { status: { $in: ["completed", "in_progress"] } } },
-        {
-          $lookup: {
-            from: "services",
-            localField: "serviceId",
-            foreignField: "_id",
-            as: "service",
-          },
-        },
-        { $unwind: { path: "$service", preserveNullAndEmptyArrays: true } },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: { $ifNull: ["$service.price", 0] } },
-          },
-        },
-      ]),
-      WalletTransaction.aggregate([
-        { $match: { type: "credit" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
+      projectRevenue(),
+      legacyRevenue(),
+      walletFunding(),
       Ticket.countDocuments({ status: "open" }),
       Ticket.countDocuments({ status: { $in: ["open", "in_progress"] } }),
       Rental.countDocuments({ status: "active" }),
@@ -78,8 +60,9 @@ exports.getAdminAnalytics = async (req, res) => {
       }),
     ]);
 
-    const totalRevenue = revenueAgg[0]?.total || 0;
-    const totalWalletVolume = walletAgg[0]?.total || 0;
+    const legacyByCurrency = legacy.filter(row => row._id !== null)
+      .map(row => ({ currency: row._id, total: row.total, count: row.count }));
+    const totalRevenue = legacyByCurrency.find(row => row.currency === "USD")?.total || 0;
     const affiliateEarnings = affiliateAgg[0]?.total || 0;
 
     res.json({
@@ -98,7 +81,11 @@ exports.getAdminAnalytics = async (req, res) => {
 
         // Revenue
         totalRevenue,
-        totalWalletVolume,
+        totalWalletVolume: funding.credits,
+        marketplace,
+        legacyByCurrency,
+        legacyUnknown: legacy.find(row => row._id === null)?.count || 0,
+        deposits: { currency: "USD", count: funding.depositCount, total: funding.deposits },
 
         // Support
         pendingTickets,
@@ -127,10 +114,13 @@ exports.getAdminAnalytics = async (req, res) => {
  */
 exports.getCharts = async (req, res) => {
   try {
-    const days = parseInt(req.query.days) || 30;
+    const days = Number(req.query.days ?? 30);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return res.status(400).json({ ok: false, message: "Choose a period of 1 to 365 days" });
+    }
     const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
-    startDate.setHours(0, 0, 0, 0);
+    startDate.setUTCDate(startDate.getUTCDate() - days + 1);
+    startDate.setUTCHours(0, 0, 0, 0);
 
     const [ordersPerDay, revenuePerDay, usersPerDay, ticketsPerDay] =
       await Promise.all([
@@ -148,33 +138,7 @@ exports.getCharts = async (req, res) => {
           { $sort: { _id: 1 } },
         ]),
 
-        // Revenue per day (from completed/processing orders)
-        Order.aggregate([
-          {
-            $match: {
-              createdAt: { $gte: startDate },
-              status: { $in: ["completed", "processing"] },
-            },
-          },
-          {
-            $lookup: {
-              from: "services",
-              localField: "serviceId",
-              foreignField: "_id",
-              as: "service",
-            },
-          },
-          { $unwind: { path: "$service", preserveNullAndEmptyArrays: true } },
-          {
-            $group: {
-              _id: {
-                $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
-              },
-              total: { $sum: { $ifNull: ["$service.price", 0] } },
-            },
-          },
-          { $sort: { _id: 1 } },
-        ]),
+        legacyRevenue(startDate),
 
         // New users per day
         User.aggregate([

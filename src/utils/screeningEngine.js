@@ -50,7 +50,7 @@ function runAutoValidation(screening, answers) {
     const answer = answers[idx];
 
     if (questionType === "single" || questionType === "multiple_choice") {
-      if (String(answer || "") === String(correctAnswers[0] || "")) {
+      if (correctAnswers[0]?.trim() && String(answer ?? "") === correctAnswers[0]) {
         earnedPoints += q.points || 1;
       }
     } else if (questionType === "multi") {

@@ -1,6 +1,7 @@
+const { tokenIdentity } = require("../services/tokenIdentity");
 const jwt = require("jsonwebtoken");
 
-module.exports = (req, res, next) => {
+module.exports = async (req, res, next) => {
   const headerToken = req.headers.authorization?.split(" ")[1];
 
   // EventSource cannot send custom headers, so allow query token ONLY for SSE stream.
@@ -25,19 +26,17 @@ module.exports = (req, res, next) => {
     return res.status(500).json({ message: "Server configuration error" });
   }
 
+  let decoded;
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    // Normalize legacy token shapes to a stable contract.
-    // Controllers expect: req.user.id and req.user.role
-    const normalized = {
-      ...(decoded && typeof decoded === "object" ? decoded : {}),
-    };
-    normalized.id =
-      normalized.id || normalized._id || normalized.userId || normalized.uid;
-
-    req.user = normalized;
-    next();
-  } catch (err) {
-    res.status(401).json({ message: "Invalid token" });
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return res.status(401).json({ message: "Invalid token" });
   }
+  try {
+    req.user = await tokenIdentity(decoded);
+  } catch (err) {
+    if (err.status === 401) return res.status(401).json({ message: "Invalid token" });
+    return res.status(503).json({ message: "Unable to verify account access. Try again." });
+  }
+  next();
 };

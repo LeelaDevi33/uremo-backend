@@ -102,6 +102,14 @@ const siteSettingsSchema = new mongoose.Schema(
       brandName: simpleText,
       bannerText: simpleText,
     },
+    marketplace: {
+      rolesTitle: { ...simpleText, maxlength: 100 },
+      rolesIntro: { ...simpleText, maxlength: 300 },
+      rentTitle: { ...simpleText, maxlength: 100 },
+      rentIntro: { ...simpleText, maxlength: 300 },
+      buyTitle: { ...simpleText, maxlength: 100 },
+      buyIntro: { ...simpleText, maxlength: 300 },
+    },
 
     support: {
       whatsappNumber: simpleText,

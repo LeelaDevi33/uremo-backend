@@ -92,8 +92,9 @@ const userSchema = new mongoose.Schema(
     },
 
     // PATCH_54: Password reset fields
-    passwordResetToken: String,
-    passwordResetExpires: Date,
+    passwordResetToken: { type: String, select: false },
+    passwordResetExpires: { type: Date, select: false },
+    sessionVersion: { type: Number, default: 0 },
 
     // PATCH_54: Phone number for duplicate prevention
     phone: {

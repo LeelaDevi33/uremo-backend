@@ -92,6 +92,16 @@ const walletTransactionSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    methodId: { type: mongoose.Schema.Types.ObjectId, ref: "WalletFundingMethod" },
+    methodName: String,
+    paymentReference: String,
+    gatewayMode: { type: String, enum: ["sandbox", "live"] },
+    // Admin verification evidence, kept out of user transaction responses.
+    settlementReference: { type: String, select: false },
+    settlementVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", select: false },
+    adjustmentOperator: { type: mongoose.Schema.Types.ObjectId, ref: "User", select: false },
+    adjustmentKey: { type: String, select: false },
+    undoTransactionId: { type: mongoose.Schema.Types.ObjectId, ref: "WalletTransaction" },
     // Reference to related document (order ID, etc.)
     referenceId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -107,6 +117,8 @@ const walletTransactionSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
+    // Portion of this marketplace charge or refund backed by withdrawable earnings.
+    withdrawablePortion: { type: Number, min: 0 },
     // Balance after this transaction (set when status becomes 'success')
     balanceAfter: {
       type: Number,
@@ -131,6 +143,18 @@ walletTransactionSchema.index({ status: 1, createdAt: -1 });
 
 // PATCH_80: Index for provider reference lookups (webhook processing)
 walletTransactionSchema.index({ provider: 1, providerRef: 1 });
+walletTransactionSchema.index({ adjustmentOperator: 1, adjustmentKey: 1 }, { unique: true,
+  partialFilterExpression: { adjustmentKey: { $type: "string" }, adjustmentOperator: { $type: "objectId" } } });
+// Legacy PayPal orders have no wallet transaction ID in their purchase unit.
+// Their stored provider order ID must identify exactly one top-up, even after a retry.
+walletTransactionSchema.index({ providerRef: 1 }, { unique: true,
+  partialFilterExpression: { provider: "paypal", source: "topup", providerRef: { $type: "string" } } });
+walletTransactionSchema.index({ user: 1, methodId: 1, paymentReference: 1 }, {
+  unique: true, partialFilterExpression: { provider: "manual", paymentReference: { $type: "string" }, status: { $in: ["initiated", "pending"] } },
+});
+walletTransactionSchema.index({ settlementReference: 1 }, {
+  unique: true, partialFilterExpression: { settlementReference: { $type: "string" } },
+});
 
 /**
  * PATCH_80: Static method to validate state transitions

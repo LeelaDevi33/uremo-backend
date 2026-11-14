@@ -1,18 +1,10 @@
-const BASE_URL = "https://uremo-backend.onrender.com";
+const { baseUrl: BASE_URL, email, password, testFetch } = require("./admin-test-config");
 
 async function test() {
   console.log("Testing admin workspace routes...\n");
 
-  const email = process.env.ADMIN_EMAIL;
-  const password = process.env.ADMIN_PASSWORD;
-
-  if (!email || !password) {
-    console.log("ERROR: Set ADMIN_EMAIL and ADMIN_PASSWORD env vars");
-    return;
-  }
-
   try {
-    const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+    const loginRes = await testFetch(`${BASE_URL}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
@@ -20,16 +12,16 @@ async function test() {
 
     const loginData = await loginRes.json();
     console.log("Status:", loginRes.status);
-    console.log("Result:", JSON.stringify(loginData, null, 2));
+
 
     if (loginData.token) {
       console.log("\n✅ LOGIN SUCCESS");
-      console.log("Token:", loginData.token.substring(0, 30) + "...");
+
       console.log("Role:", loginData.user?.role);
 
       // Now test creating a service
       console.log("\n--- Creating Test Service ---");
-      const createRes = await fetch(`${BASE_URL}/api/admin/services`, {
+      const createRes = await testFetch(`${BASE_URL}/api/admin/services`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -57,7 +49,7 @@ async function test() {
 
         // Test edit
         console.log("\n--- Editing Service ---");
-        const editRes = await fetch(
+        const editRes = await testFetch(
           `${BASE_URL}/api/admin/services/${createData.service._id}`,
           {
             method: "PUT",
@@ -79,7 +71,7 @@ async function test() {
 
       // Test JarvisX admin chat
       console.log("\n--- Testing JarvisX Admin ---");
-      const jarvisRes = await fetch(`${BASE_URL}/api/jarvisx/chat`, {
+      const jarvisRes = await testFetch(`${BASE_URL}/api/jarvisx/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

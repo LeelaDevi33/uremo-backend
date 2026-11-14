@@ -15,9 +15,6 @@ const {
   unarchiveRejectedOrder,
   testEmail,
   getAllUsers,
-  resetAllWallets,
-  resetAllAffiliateData,
-  resetAllTestData,
 } = require("../controllers/admin.controller");
 const {
   createEmailCampaign,
@@ -45,7 +42,27 @@ const {
   putAdminSettingsRaw,
 } = require("../controllers/siteSettings.controller");
 
+const retiredCatalog = require("../middlewares/retiredCatalog");
 const router = express.Router();
+const operations = require("../controllers/adminOperations.controller");
+const { projectRevenue } = require("../services/revenueReporting");
+router.get("/operations-summary", auth, admin, operations.overview);
+router.get("/marketplace-receipts", auth, admin, operations.receipts);
+
+// Legacy CMS aliases share this prefix across two mounted routers. Preserve historical reads.
+router.use("/services", (req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  return retiredCatalog(req, res);
+});
+
+router.get("/marketplace-revenue", auth, admin, async (_req, res, next) => {
+  try {
+    const totals = await projectRevenue();
+    res.set("Cache-Control", "private, no-store").json(totals);
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/orders", auth, admin, getAllOrders);
 router.get("/orders/rejected", auth, admin, getRejectedArchivedOrders);
@@ -112,15 +129,10 @@ router.put("/settings/raw", auth, admin, putAdminSettingsRaw);
 // User management (admin-only)
 router.get("/users", auth, admin, getAllUsers);
 
-// ============================================
-// ADMIN RESET ENDPOINTS - For production launch
-// ============================================
-// POST /api/admin/reset/wallets - Reset all wallet balances to 0
-router.post("/reset/wallets", auth, admin, resetAllWallets);
-// POST /api/admin/reset/affiliate - Reset all affiliate data
-router.post("/reset/affiliate", auth, admin, resetAllAffiliateData);
-// POST /api/admin/reset/all-test-data - Reset all test data (wallets + affiliate)
-router.post("/reset/all-test-data", auth, admin, resetAllTestData);
+// Historical controls erased financial history across every account.
+router.post(["/reset/wallets", "/reset/affiliate", "/reset/all-test-data"], auth, admin, (_req, res) => {
+  res.status(410).json({ message: "Bulk account resets are closed. Use a recorded adjustment for a specific account." });
+});
 
 // PATCH_107: Repair legacy service data (admin-only)
 router.post("/services/repair-legacy", auth, admin, repairLegacyServices);

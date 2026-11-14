@@ -5,6 +5,7 @@
 
 const User = require("../../models/User");
 const AffiliateCommission = require("../../models/AffiliateCommission");
+const { getFrontendUrl } = require("../../config/frontendUrl");
 
 /**
  * Get affiliate status for authenticated user
@@ -48,7 +49,7 @@ async function getAffiliateStatus(params, context) {
     return {
       data: {
         referralCode: user.referralCode,
-        referralLink: `https://uremo.online/signup?ref=${user.referralCode}`,
+        referralLink: user.referralCode ? `${getFrontendUrl()}/signup?ref=${encodeURIComponent(user.referralCode)}` : null,
         balance: user.affiliateBalance || 0,
         totalEarned: user.totalAffiliateEarned || 0,
         referralCount,

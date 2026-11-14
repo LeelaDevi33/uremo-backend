@@ -23,7 +23,6 @@ jobs:
             exit 1;
           fi
 
-          URL="$BACKEND_URL/api/cron/payment-pending-reminders?secret=$CRON_SECRET"
-          echo "Calling: $URL"
-          curl -sS -f "$URL"
-          echo ""
+          curl --fail --silent --show-error --max-time 60 \
+            --header "Authorization: Bearer $CRON_SECRET" \
+            "${BACKEND_URL%/}/api/cron/payment-pending-reminders"

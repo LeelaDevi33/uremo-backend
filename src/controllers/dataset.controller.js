@@ -3,7 +3,9 @@ const DatasetTask = require("../models/DatasetTask");
 const RlhfSubmission = require("../models/RlhfSubmission");
 const Project = require("../models/Project");
 const ApplyWork = require("../models/ApplyWork");
-const User = require("../models/User");
+const WalletTransaction = require("../models/WalletTransaction");
+const { changeFunds, isWalletAmount } = require("../services/walletFunds");
+const { roleError } = require("../services/adminWorkRoles");
 
 /**
  * PATCH_95: Dataset + RLHF Submission Controller
@@ -65,7 +67,7 @@ exports.adminCreateDataset = async (req, res) => {
       minWordCount: minWordCount ?? 0,
       allowMultiResponseComparison: allowMultiResponseComparison ?? false,
       isActive: false,
-      createdBy: req.user._id,
+      createdBy: req.user.id,
     });
 
     res.status(201).json({ success: true, dataset });
@@ -227,7 +229,7 @@ exports.adminBulkAddTasks = async (req, res) => {
 
 exports.adminUpdateTask = async (req, res) => {
   try {
-    const task = await DatasetTask.findById(req.params.taskId);
+    const task = await DatasetTask.findOne({ _id: req.params.taskId, datasetId: req.params.id });
     if (!task) return res.status(404).json({ message: "Task not found" });
 
     const {
@@ -261,13 +263,16 @@ exports.adminUpdateTask = async (req, res) => {
 
 exports.adminDeleteTask = async (req, res) => {
   try {
-    const task = await DatasetTask.findById(req.params.taskId);
-    if (!task) return res.status(404).json({ message: "Task not found" });
-
-    await DatasetTask.findByIdAndDelete(task._id);
+    await DatasetTask.db.transaction(async session => {
+      const task = await DatasetTask.findOneAndDelete({ _id: req.params.taskId, datasetId: req.params.id }, { session });
+      if (!task) throw roleError(404, "Task not found");
+      if (await RlhfSubmission.exists({ taskId: task._id }).session(session)) {
+        throw roleError(409, "Deactivate this task to preserve its submission and payment history");
+      }
+    });
     res.json({ success: true, message: "Task deleted" });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.message });
   }
 };
 
@@ -283,24 +288,26 @@ exports.workerGetProjectTasks = async (req, res) => {
       return res.status(400).json({ message: "This is not an RLHF project" });
     }
     // PATCH_96: Ownership check — only assigned worker can access tasks
-    if (project.assignedTo?.toString() !== req.user._id.toString()) {
+    if (String(project.assignedTo) !== String(req.user.id)) {
       return res.status(403).json({ message: "You are not assigned to this project" });
     }
+    if (!["assigned", "in_progress"].includes(project.status)) return res.status(409).json({ message: "This assignment is closed" });
 
-    const dataset = await Dataset.findById(project.datasetId).lean();
+    const dataset = await Dataset.findOne({ _id: project.datasetId, isActive: true }).lean();
     if (!dataset) return res.status(404).json({ message: "Dataset not found" });
 
     const tasks = await DatasetTask.find({
       datasetId: dataset._id,
       isActive: true,
     })
+      .select("prompt responseA responseB imageUrl referenceSources")
       .sort({ createdAt: 1 })
       .lean();
 
     // Get worker's existing submissions
     const submissions = await RlhfSubmission.find({
       projectId: project._id,
-      workerId: req.user._id,
+      workerId: req.user.id,
     }).lean();
 
     const submittedTaskIds = new Set(
@@ -332,8 +339,8 @@ exports.workerGetProjectTasks = async (req, res) => {
 exports.workerSubmitTask = async (req, res) => {
   try {
     const { taskId, answerPayload } = req.body;
-    if (!taskId) return res.status(400).json({ message: "taskId is required" });
-    if (!answerPayload || typeof answerPayload !== "object") {
+    if (!Project.base.isObjectIdOrHexString(taskId)) return res.status(400).json({ message: "A valid task ID is required" });
+    if (!answerPayload || typeof answerPayload !== "object" || Array.isArray(answerPayload)) {
       return res.status(400).json({ message: "answerPayload is required" });
     }
 
@@ -343,24 +350,26 @@ exports.workerSubmitTask = async (req, res) => {
       return res.status(400).json({ message: "Not an RLHF project" });
     }
     // PATCH_96: Ownership check — only assigned worker can submit
-    if (project.assignedTo?.toString() !== req.user._id.toString()) {
+    if (String(project.assignedTo) !== String(req.user.id)) {
       return res.status(403).json({ message: "You are not assigned to this project" });
     }
+    if (!["assigned", "in_progress"].includes(project.status)) return res.status(409).json({ message: "This assignment is closed" });
 
-    const task = await DatasetTask.findById(taskId).lean();
+    const task = await DatasetTask.findOne({ _id: taskId, datasetId: project.datasetId, isActive: true }).lean();
     if (!task) return res.status(404).json({ message: "Task not found" });
 
     // Check for duplicate
     const existing = await RlhfSubmission.findOne({
       taskId: task._id,
-      workerId: req.user._id,
+      workerId: req.user.id,
     });
     if (existing) {
       return res.status(400).json({ message: "Already submitted this task" });
     }
 
     // Auto-score based on dataset type
-    const dataset = await Dataset.findById(project.datasetId).lean();
+    const dataset = await Dataset.findOne({ _id: project.datasetId, isActive: true }).lean();
+    if (!dataset) return res.status(404).json({ message: "Dataset not found" });
     let autoScore = 50; // default partial credit
 
     if (dataset) {
@@ -397,14 +406,22 @@ exports.workerSubmitTask = async (req, res) => {
       }
     }
 
-    const submission = await RlhfSubmission.create({
-      projectId: project._id,
-      datasetId: project.datasetId,
-      taskId: task._id,
-      workerId: req.user._id,
-      answerPayload,
-      autoScore,
-      reviewStatus: "pending_review",
+    const submission = await RlhfSubmission.db.transaction(async session => {
+      // Serialize acceptance with project cancellation, dataset retirement or task removal.
+      // The version increment is internal and leaves the editor's displayed timestamp intact.
+      for (const [model, filter] of [
+        [Project, { _id: project._id, projectType: "rlhf_dataset", assignedTo: req.user.id, datasetId: dataset._id, status: { $in: ["assigned", "in_progress"] } }],
+        [Dataset, { _id: dataset._id, isActive: true, updatedAt: dataset.updatedAt || null }],
+        [DatasetTask, { _id: task._id, datasetId: dataset._id, isActive: true, updatedAt: task.updatedAt || null }],
+      ]) {
+        const lock = await model.updateOne(filter, { $inc: { __v: 1 } }, { timestamps: false, session });
+        if (!lock.matchedCount) throw roleError(409, "The assigned task changed. Reload it before submitting.");
+      }
+      const [created] = await RlhfSubmission.create([{
+        projectId: project._id, datasetId: project.datasetId, taskId: task._id, workerId: req.user.id,
+        answerPayload, autoScore, reviewStatus: "pending_review",
+      }], { session, ordered: true });
+      return created;
     });
 
     res.status(201).json({ success: true, submission });
@@ -412,7 +429,7 @@ exports.workerSubmitTask = async (req, res) => {
     if (err.code === 11000) {
       return res.status(400).json({ message: "Already submitted this task" });
     }
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.status ? err.message : "Could not submit the dataset task." });
   }
 };
 
@@ -454,57 +471,41 @@ exports.adminReviewSubmission = async (req, res) => {
         .json({ message: "Action must be 'approved' or 'rejected'" });
     }
 
-    // PATCH_96: Atomic status guard — prevents double-review race condition
-    const updateFields = {
-      reviewStatus: action,
-      reviewedBy: req.user._id,
-      reviewedAt: new Date(),
-    };
-    if (finalScore !== undefined) updateFields.finalScore = finalScore;
-
-    const submission = await RlhfSubmission.findOneAndUpdate(
-      { _id: req.params.submissionId, reviewStatus: "pending_review" },
-      { $set: updateFields },
-      { new: true }
-    );
-    if (!submission) {
-      const existing = await RlhfSubmission.findById(req.params.submissionId);
-      if (!existing) return res.status(404).json({ message: "Submission not found" });
-      return res.status(400).json({ message: `Submission already ${existing.reviewStatus}` });
+    if (!Project.base.isObjectIdOrHexString(req.params.submissionId)) throw roleError(400, "Invalid submission ID");
+    if (finalScore !== undefined && (!Number.isFinite(finalScore) || finalScore < 0 || finalScore > 100)) {
+      throw roleError(400, "The final score must be between 0 and 100");
     }
-
-    // Credit reward on approval (idempotent — check rewardCredited flag)
-    if (action === "approved" && !submission.rewardCredited) {
-      const project = await Project.findById(submission.projectId).lean();
-      const rewardAmount = rewardOverride || project?.rewardPerTask || 0;
-
-      if (rewardAmount > 0) {
-        // PATCH_96: Atomic wallet credit
-        await User.findByIdAndUpdate(submission.workerId, {
-          $inc: { walletBalance: rewardAmount },
-        });
-        await ApplyWork.findOneAndUpdate(
-          { user: submission.workerId },
-          { $inc: { totalEarnings: rewardAmount } },
-        );
-
-        // Mark reward as credited atomically
-        await RlhfSubmission.findByIdAndUpdate(submission._id, {
-          $set: { rewardCredited: true, rewardAmount },
-        });
+    const submission = await RlhfSubmission.db.transaction(async session => {
+      const row = await RlhfSubmission.findById(req.params.submissionId).session(session);
+      if (!row) throw roleError(404, "Submission not found");
+      if (row.reviewStatus !== "pending_review" || row.rewardCredited) throw roleError(409, "This submission has already been reviewed or credited");
+      if (action === "approved") {
+        const project = await Project.findOne({ _id: row.projectId, datasetId: row.datasetId, assignedTo: row.workerId,
+          projectType: "rlhf_dataset", status: { $in: ["assigned", "in_progress", "completed"] } }).session(session).lean();
+        if (!project) throw roleError(409, "This submission no longer matches its worker assignment. Review the project.");
+        const task = await DatasetTask.exists({ _id: row.taskId, datasetId: row.datasetId }).session(session);
+        if (!task) throw roleError(409, "This submission no longer matches its dataset task.");
+        const amount = rewardOverride ?? project.rewardPerTask ?? 0;
+        if (amount !== 0 && !isWalletAmount(amount)) throw roleError(400, "Use a nonnegative USD reward with at most two decimal places");
+        if (amount > 0) {
+          const funds = await changeFunds(row.workerId, amount, "earning", session);
+          const filter = { user: row.workerId, ...(project.workPositionId ? { position: project.workPositionId } : { currentProject: row.projectId }) };
+          await ApplyWork.updateOne(filter, { $inc: { totalEarnings: amount } }, { session });
+          await WalletTransaction.create([{ user: row.workerId, type: "credit", source: "earning", provider: "internal", status: "success",
+            referenceId: row._id, amount, balanceBefore: funds.balanceBefore, balanceAfter: funds.walletBalance,
+            description: "Dataset task reward: " + project.title }], { session, ordered: true });
+          row.set({ rewardAmount: amount, rewardCredited: true });
+        }
       }
-
-      await updateWorkerRlhfMetrics(submission.workerId);
-    }
-
-    if (action === "rejected") {
-      await updateWorkerRlhfMetrics(submission.workerId);
-    }
-
-    const result = await RlhfSubmission.findById(submission._id);
-    res.json({ success: true, submission: result });
+      row.set({ reviewStatus: action, reviewedBy: req.user.id, reviewedAt: new Date() });
+      if (finalScore !== undefined) row.finalScore = finalScore;
+      await row.save({ session });
+      return row;
+    });
+    await updateWorkerRlhfMetrics(submission.workerId);
+    res.json({ success: true, submission });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || 500).json({ message: err.status ? err.message : "Could not review the submission." });
   }
 };
 
@@ -524,7 +525,7 @@ async function updateWorkerRlhfMetrics(workerId) {
         : 0;
 
     const totalScore = approved.reduce(
-      (sum, s) => sum + (s.finalScore || s.autoScore || 0),
+      (sum, s) => sum + (s.finalScore ?? s.autoScore ?? 0),
       0,
     );
     const avgScore =
@@ -539,7 +540,7 @@ async function updateWorkerRlhfMetrics(workerId) {
           )
         : 0;
 
-    await ApplyWork.findOneAndUpdate(
+    await ApplyWork.updateMany(
       { user: workerId },
       {
         rlhfScore: avgScore,

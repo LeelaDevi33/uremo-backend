@@ -14,14 +14,6 @@ exports.getActivePaymentMethods = async (req, res) => {
 
 exports.checkout = async (req, res) => {
   try {
-    const service = await Service.findById(req.body.serviceId);
-    if (!service) return res.status(404).json({ message: "Service not found" });
-
-    const order = await Order.create({
-      userId: req.user.id,
-      serviceId: service._id,
-      status: "pending",
-    });
     // Lazy-load Stripe to avoid importing it on server startup
     if (
       !process.env.STRIPE_SECRET_KEY ||
@@ -32,6 +24,16 @@ exports.checkout = async (req, res) => {
         .json({ message: "Payments are temporarily disabled" });
     }
     const stripe = require("../config/stripe");
+
+    const service = await Service.findById(req.body.serviceId);
+    if (!service) return res.status(404).json({ message: "Service not found" });
+    const order = await Order.create({
+      userId: req.user.id,
+      serviceId: service._id,
+      quotedAmount: service.price,
+      quotedCurrency: service.currency || "USD",
+      status: "pending",
+    });
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
