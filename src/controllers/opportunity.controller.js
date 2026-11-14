@@ -7,7 +7,7 @@ const WorkPosition = require("../models/WorkPosition");
 const Project = require("../models/Project");
 const Screening = require("../models/Screening");
 const ApplyWork = require("../models/ApplyWork");
-const { specializationRoles } = require("../services/roleCatalog");
+const { catalogFields, specializationRoles } = require("../services/roleCatalog");
 const { meetsScreenings } = require("../services/roleProjects");
 const { createLumiereSample } = require("../services/lumiereSample");
 
@@ -190,7 +190,7 @@ const qualifiedStatuses = ["ready_to_work", "assigned", "working"];
 const publishedOffer = { status: "published", rightsConfirmed: true, applyEnabled: false, workPositionId: null,
   projectId: { $type: "objectId" }, projectRoleId: { $type: "objectId" }, projectPublishedAt: { $type: "date" } };
 const contextFields = "title workPositionId status screeningId screeningIds";
-const roleFields = "title category serviceId active hasScreening screeningId screeningIds";
+const roleFields = catalogFields + " active hasScreening screeningId screeningIds";
 
 async function checkRentalScreenings(role, project, session) {
   if (!role.active) throw error(400, "Activate the project's specialization before publishing a rental.");

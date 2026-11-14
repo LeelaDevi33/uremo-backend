@@ -109,6 +109,41 @@ test("public role and marketplace responses exclude internal notes and project r
     assert.equal(hidden.status, 200);
     assert.equal(await findPublic(), undefined);
   });
+  await t.test("historical briefs stay editable while role discovery, counts and applications agree", async () => {
+    const common = { category: "qa", active: true };
+    const [fixture, formerService, validRole] = await WorkPosition.create([
+      { ...common, title: "Test Data Entry Role", description: "Test position for PATCH_44 multi-job validation" },
+      { ...common, title: "Outlier AI", description: "Screening without getting detected their AI detection system",
+        requirements: "Must be onboarded to an account for screening test" },
+      { ...common, title: "Outlier AI", description: "Assess model outputs using an approved rubric.", requirements: "QA experience" },
+    ]);
+    const worker = await User.findOne({ role: "user" });
+    const editor = await User.findOne({ role: "admin" });
+    const headers = actor => ({ "Content-Type": "application/json", Authorization: "Bearer " + jwt.sign({ id: actor.id }, process.env.JWT_SECRET) });
+    const directory = await (await fetch(base + "/api/work-positions")).json();
+    assert.ok(directory.some(role => role._id === validRole.id));
+    const stats = await (await fetch(base + "/api/public/stats")).json();
+    assert.equal(stats.stats.activeJobRoles, directory.length);
+    const adminRoles = await (await fetch(base + "/api/admin/work-positions", { headers: headers(editor) })).json();
+    for (const excluded of [fixture, formerService]) {
+      assert.ok(!directory.some(role => role._id === excluded.id));
+      const adminRow = adminRoles.find(role => role._id === excluded.id);
+      assert.equal(adminRow.isSpecialization, false);
+      assert.ok(adminRow.directoryExclusionReason);
+      const application = await fetch(base + "/api/workspace/apply/" + excluded.id, {
+        method: "POST", headers: headers(worker), body: JSON.stringify({}),
+      });
+      assert.equal(application.status, 404);
+    }
+    const edit = await fetch(base + "/api/admin/work-positions/" + formerService.id, {
+      method: "PUT", headers: headers(editor), body: JSON.stringify({
+        expectedRevision: adminRoles.find(role => role._id === formerService.id).revision,
+        description: "Evaluate anonymized datasets under an approved rubric.", requirements: "Experience with data quality.",
+      }),
+    });
+    assert.equal(edit.status, 200);
+    assert.ok((await (await fetch(base + "/api/work-positions")).json()).some(role => role._id === formerService.id));
+  });
   await t.test("retired catalogue returns a migration notice without disclosing listings", async () => {
     const response = await fetch(base + "/api/services/marketplace?intent=all");
     assert.equal(response.status, 410);

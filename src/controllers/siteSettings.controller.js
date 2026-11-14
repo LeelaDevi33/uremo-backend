@@ -249,6 +249,9 @@ async function settingsWrite(expected) {
   };
 }
 
+const validSupportEmail = value =>
+  value.length <= 120 && /^[^\s@<>?#,;:]+@[^\s@<>?#,;:]+\.[^\s@<>?#,;:]+$/.test(value);
+
 const publicProjection = (doc) => {
   // Backward compatibility: support older keys (bannerText + faq.*)
   const legacyBannerText = String(doc?.bannerText || "").trim();
@@ -262,13 +265,17 @@ const publicProjection = (doc) => {
       DEFAULTS.site.bannerText,
   };
 
+  const address = String(doc?.support?.supportEmail || "").trim();
+  // An old installation default pointed to an unconfigured mailbox. Preserve it
+  // for editors and publish it only after they explicitly enable the address.
+  const emailVisible = validSupportEmail(address) &&
+    (doc?.support?.emailVisible ?? address.toLowerCase() !== "support@uremo.online");
   const support = {
     whatsappNumber:
       String(doc?.support?.whatsappNumber || "").trim() ||
       DEFAULTS.support.whatsappNumber,
-    supportEmail:
-      String(doc?.support?.supportEmail || "").trim() ||
-      DEFAULTS.support.supportEmail,
+    supportEmail: emailVisible ? address : "",
+    emailVisible,
   };
 
   const footer = {
@@ -570,17 +577,24 @@ exports.updateAdminSettings = async (req, res) => {
     }
 
     if (hasOwn(body, "support")) {
+      if (!isPlainSettingsObject(body.support)) return res.status(400).json({ message: "Provide support settings" });
       patch.support = {};
       if (hasOwn(body.support, "whatsappNumber"))
         patch.support.whatsappNumber = clampString(
           body.support.whatsappNumber,
           32
         );
-      if (hasOwn(body.support, "supportEmail"))
-        patch.support.supportEmail = clampString(
-          body.support.supportEmail,
-          120
-        );
+      if (hasOwn(body.support, "supportEmail")) {
+        const value = body.support.supportEmail;
+        if (typeof value !== "string" || (value.trim() && !validSupportEmail(value.trim()))) {
+          return res.status(400).json({ message: "Enter a valid support email address" });
+        }
+        patch.support.supportEmail = value.trim();
+      }
+      if (hasOwn(body.support, "emailVisible")) {
+        if (typeof body.support.emailVisible !== "boolean") return res.status(400).json({ message: "Choose whether to show the support email" });
+        patch.support.emailVisible = body.support.emailVisible;
+      }
     }
 
     if (hasOwn(body, "footer")) {

@@ -58,6 +58,28 @@ test("marketplace cutover preserves history and reports only settled project rev
     assert.equal(final.marketplace.rentIntro, "Qualified workers can rent.");
     assert.equal(final.marketplace.buyTitle, "Full Access projects");
   });
+  await t.test("support email visibility preserves the admin address and applies to all public reads", async () => {
+    const Settings = require("../src/models/SiteSettings");
+    const read = async () => (await (await request("/settings/public", "GET", null)).json()).support;
+    const edit = async support => {
+      const { revision } = await (await request("/admin/settings", "GET", editor)).json();
+      return request("/admin/settings", "PUT", editor, { support, expectedRevision: revision });
+    };
+    await Settings.updateOne({ singletonKey: "main" }, { $set: { "support.supportEmail": "Support@uremo.online" } });
+    assert.equal((await read()).supportEmail, "");
+    assert.equal((await (await request("/admin/settings", "GET", editor)).json()).support.supportEmail, "Support@uremo.online");
+    assert.equal((await edit({ emailVisible: true })).status, 200);
+    assert.equal((await read()).supportEmail, "Support@uremo.online");
+    assert.equal((await edit({ supportEmail: "desk@example.test", emailVisible: false })).status, 200);
+    assert.equal((await read()).supportEmail, "");
+    await Settings.updateOne({ singletonKey: "main" }, { $unset: { "support.emailVisible": 1 } });
+    assert.equal((await read()).supportEmail, "desk@example.test");
+    assert.equal((await edit({ emailVisible: "yes" })).status, 400);
+    assert.equal((await edit({ supportEmail: "invalid address" })).status, 400);
+    await Settings.updateOne({ singletonKey: "main" }, { $set: { "support.supportEmail": "invalid address", "support.emailVisible": true } });
+    assert.equal((await read()).emailVisible, false);
+    assert.equal((await edit({ supportEmail: "" })).status, 200);
+  });
   await t.test("ticket replies return the persisted state and closed tickets require explicit reopening", async () => {
     const Ticket = require("../src/models/Ticket");
     for (const [initial, expected] of [["open", "in_progress"], ["closed", "closed"], ["waiting_user", "waiting_user"]]) {

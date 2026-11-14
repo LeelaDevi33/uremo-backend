@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const WorkPosition = require("../models/WorkPosition");
 const brief = require("../models/roleBrief");
-const { specializationRoles } = require("../services/roleCatalog");
+const { directoryExclusions, specializationRoles } = require("../services/roleCatalog");
 const { roleError, withRevision, editRole, removeRole } = require("../services/adminWorkRoles");
 
 const publicPositionFields =
@@ -88,8 +88,12 @@ exports.listAdmin = async (req, res, next) => {
     const positions = await WorkPosition.find()
       .sort({ active: -1, sortOrder: 1, createdAt: -1 })
       .lean();
-    const specializations = new Set((await specializationRoles(positions)).map(role => String(role._id)));
-    res.json(positions.map(role => ({ ...withRevision(role), isSpecialization: specializations.has(String(role._id)) })));
+    const exclusions = await directoryExclusions(positions);
+    res.json(positions.map(role => ({
+      ...withRevision(role),
+      isSpecialization: !exclusions.has(String(role._id)),
+      directoryExclusionReason: exclusions.get(String(role._id)),
+    })));
   } catch (err) {
     next(err);
   }
