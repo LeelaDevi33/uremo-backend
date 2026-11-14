@@ -5,6 +5,7 @@ const ApplyWork = require("../models/ApplyWork");
 const Project = require("../models/Project");
 const Service = require("../models/Service");
 const ProofOfWork = require("../models/ProofOfWork");
+const { catalogFields, directoryExclusions } = require("./roleCatalog");
 
 function roleError(status, message) { return Object.assign(new Error(message), { status }); }
 function revision(record) { return (record.updatedAt || record.createdAt || record._id.getTimestamp()).toISOString(); }
@@ -49,10 +50,11 @@ async function reviewApplication(id, status, { roleId, adminId, reason } = {}) {
     const applicant = await ApplyWork.findOne({ _id: id, ...(roleId ? { position: roleId } : {}) }).session(session);
     if (!applicant) throw roleError(404, "Application not found");
     const job = applicant.position ? await WorkPosition.findById(applicant.position)
-      .select("title hasScreening screeningId screeningIds").session(session).lean() : null;
+      .select(catalogFields + " hasScreening screeningId screeningIds").session(session).lean() : null;
     if (applicant.status === status) return { applicant, job, changed: false };
     if (applicant.currentProject) throw roleError(409, "Resolve the current assignment before changing the application decision");
     if (status === "approved" && applicant.position && !job) throw roleError(409, "The application role requires review");
+    if (status === "approved" && job && (await directoryExclusions([job], session)).size) throw roleError(409, "This role is archived and cannot accept new approvals");
     applicant.status = status;
     if (status === "approved") {
       applicant.approvedBy = adminId;

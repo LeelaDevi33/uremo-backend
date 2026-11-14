@@ -5,7 +5,8 @@ const Opportunity = require("../models/Opportunity");
 const WalletTransaction = require("../models/WalletTransaction");
 const { changeFunds, isWalletAmount } = require("./walletFunds");
 const { roleError } = require("./adminWorkRoles");
-const { passedScreening } = require("./applicationScreenings");
+const { passedScreening, roleFields } = require("./applicationScreenings");
+const { directoryExclusions } = require("./roleCatalog");
 
 function meetsScreenings(worker, project, role) {
   const required = [project.screeningId, ...(project.screeningIds || [])];
@@ -34,7 +35,9 @@ async function assign(projectId, applicationId, roleId) {
     if (worker.status !== "approved" || worker.workerStatus !== "ready_to_work" || worker.currentProject) {
       throw roleError(409, "Worker must be approved, ready and available for assignment");
     }
-    const role = worker.position ? await WorkPosition.findById(worker.position).session(session).lean() : null;
+    const role = worker.position ? await WorkPosition.findByIdAndUpdate(worker.position, { $inc: { applicationRevision: 1 } },
+      { session, timestamps: false }).select(roleFields).lean() : null;
+    if (role && (await directoryExclusions([role], session)).size) throw roleError(409, "This role is archived and cannot receive new assignments");
     if (project.workPositionId && !role || !meetsScreenings(worker, project, role)) throw roleError(409, "Worker lacks a required role or passed screening");
     if (roleId && !project.workPositionId && project.category !== role?.category) throw roleError(409, "Legacy project category does not match this role");
     project.set({ assignedTo: worker.user, assignedAt: new Date(), status: "assigned" });
@@ -51,8 +54,9 @@ async function createForRole(fields) {
     if (fields.workPositionId) {
       if (!Project.base.isObjectIdOrHexString(fields.workPositionId)) throw roleError(400, "Invalid work role");
       const role = await WorkPosition.findOneAndUpdate({ _id: fields.workPositionId }, { $inc: { applicationRevision: 1 } },
-        { session, timestamps: false }).select("category hasScreening screeningId screeningIds").lean();
+        { session, timestamps: false }).select(roleFields).lean();
       if (!role) throw roleError(404, "Work role not found");
+      if ((await directoryExclusions([role], session)).size) throw roleError(409, "This role is archived and cannot receive new projects");
       const category = role.category;
       const roleIds = role.hasScreening ? [role.screeningId, ...(role.screeningIds || [])] : [];
       const required = [...new Set([...roleIds, fields.screeningId, ...(fields.screeningIds || [])].filter(Boolean).map(String))];

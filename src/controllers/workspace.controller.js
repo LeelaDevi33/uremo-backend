@@ -13,6 +13,7 @@ const Project = require("../models/Project");
 const User = require("../models/User");
 const WorkPosition = require("../models/WorkPosition");
 const screeningRules = require("../services/applicationScreenings");
+const { directoryExclusions } = require("../services/roleCatalog");
 const { acquiredProjects } = require("../services/profileProjects");
 const { paidProjectAccess } = require("../services/paidProjectAccess");
 const {
@@ -32,7 +33,7 @@ exports.getWorkspaceProfile = async (req, res) => {
     const applications = await ApplyWork.find({ user: req.user.id })
       .populate(
         "position",
-        "_id title category description trainingMaterials hasScreening screeningId screeningIds",
+        screeningRules.roleFields + " trainingMaterials",
       )
       .sort({ createdAt: -1 })
       .lean();
@@ -49,10 +50,13 @@ exports.getWorkspaceProfile = async (req, res) => {
       .select("title description payRate payType deadline status workPositionId earningsCredited completedAt").lean();
     const states = await paidProjectAccess(null, projects.map(project => project._id));
     const assignments = projects.filter(project => !states.get(String(project._id))?.required);
+    const excluded = await directoryExclusions(applications.map(app => app.position).filter(Boolean));
 
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
-        const trainingAvailable = app.status === "approved" && !["suspended", "inactive"].includes(app.workerStatus);
+        const role = app.position;
+        const roleArchived = excluded.has(String(role?._id));
+        const trainingAvailable = !roleArchived && app.status === "approved" && !["suspended", "inactive"].includes(app.workerStatus);
         const requiredScreenings = trainingAvailable ? await screeningRules.requiredSummaries(app.position, app.category) : [];
         const screening = requiredScreenings[0] || null;
         const trainingMaterials = trainingAvailable ? app.position?.trainingMaterials || [] : [];
@@ -71,7 +75,12 @@ exports.getWorkspaceProfile = async (req, res) => {
 
         return {
           _id: app._id,
-          position: app.position ? { ...app.position, trainingMaterials } : null,
+          roleArchived,
+          position: role ? {
+            _id: role._id, title: role.title, category: role.category, trainingMaterials,
+            ...(!roleArchived && { description: role.description, hasScreening: role.hasScreening,
+              screeningId: role.screeningId, screeningIds: role.screeningIds }),
+          } : null,
           positionTitle: app.positionTitle || app.position?.title || "",
           category: app.category || app.position?.category || "",
           workerStatus: normalizedStatus,
@@ -181,10 +190,14 @@ exports.markTrainingViewed = async (req, res) => {
     const application = await ApplyWork.findOne({
       _id: appId,
       user: req.user.id,
-    });
+    }).populate("position", screeningRules.roleFields);
 
     if (!application) {
       return res.status(404).json({ message: "Application not found" });
+    }
+    if ((application.position && (await directoryExclusions([application.position])).size) ||
+        (!application.position && application.populated("position"))) {
+      return res.status(409).json({ message: "Training is unavailable for this archived role." });
     }
 
     // Only allow when status is screening_unlocked
@@ -223,8 +236,9 @@ exports.getAvailableScreenings = async (req, res) => {
       user: req.user.id, status: "approved", workerStatus: { $in: screeningRules.unlocked },
     }).populate("position", screeningRules.roleFields);
     const screenings = new Map();
+    const excluded = await directoryExclusions(profiles.map(profile => profile.position).filter(Boolean));
     for (const profile of profiles) {
-      if (!profile.position && profile.populated("position")) continue;
+      if (excluded.has(String(profile.position?._id)) || (!profile.position && profile.populated("position"))) continue;
       for (const screening of await screeningRules.requiredSummaries(profile.position, profile.category)) {
         if (!screening.active) continue;
         const id = String(screening._id);
@@ -1302,6 +1316,9 @@ exports.adminReviewScreeningSubmission = async (req, res) => {
       return res.status(409).json({ message: "The application is no longer available for screening review." });
     }
     const role = profile.position ? await WorkPosition.findById(profile.position).select(screeningRules.roleFields).lean() : null;
+    if (role && (await directoryExclusions([role])).size) {
+      return res.status(409).json({ message: "Screening is unavailable for this archived role." });
+    }
     const required = await screeningRules.requiredScreeningIds(role, profile.category);
     if ((profile.position && !role) || !required.includes(String(submission.screeningId))) {
       return res.status(409).json({ message: "This screening is no longer assigned to the application." });
@@ -1771,7 +1788,7 @@ exports.adminGetEligibleWorkers = async (req, res) => {
 
     const project = await Project.findById(req.params.id).populate(
       "workPositionId",
-      "screeningId screeningIds hasScreening title category",
+      screeningRules.roleFields,
     );
 
     if (!project) {
@@ -1783,9 +1800,11 @@ exports.adminGetEligibleWorkers = async (req, res) => {
     const workers = project.status === "open" && !project.assignedTo ?
       await ApplyWork.find(workerFilter)
         .populate("user", "name email firstName lastName")
-        .populate("position", "title category screeningId screeningIds hasScreening")
+        .populate("position", screeningRules.roleFields)
         .select("user position workerStatus screeningsCompleted totalEarnings").lean() : [];
-    const eligibleWorkers = workers.filter(worker => roleProjects.meetsScreenings(worker, project, worker.position));
+    const excluded = await directoryExclusions(workers.map(worker => worker.position).filter(Boolean));
+    const eligibleWorkers = workers.filter(worker => !excluded.has(String(worker.position?._id)) &&
+      roleProjects.meetsScreenings(worker, project, worker.position));
 
     res.json({
       success: true,
