@@ -45,6 +45,7 @@ const {
 const retiredCatalog = require("../middlewares/retiredCatalog");
 const router = express.Router();
 const operations = require("../controllers/adminOperations.controller");
+const { projectRevenue } = require("../services/revenueReporting");
 router.get("/operations-summary", auth, admin, operations.overview);
 router.get("/marketplace-receipts", auth, admin, operations.receipts);
 
@@ -56,17 +57,7 @@ router.use("/services", (req, res, next) => {
 
 router.get("/marketplace-revenue", auth, admin, async (_req, res, next) => {
   try {
-    const OpportunityGrant = require("../models/OpportunityGrant");
-    const rows = await OpportunityGrant.aggregate([
-      { $match: { type: { $in: ["rent", "buy"] }, currency: "USD", refundedAt: null } },
-      { $group: {
-        _id: "$type",
-        count: { $sum: 1 },
-        cents: { $sum: { $round: [{ $multiply: ["$amount", 100] }, 0] } },
-      } },
-    ]);
-    const totals = { currency: "USD", rent: { count: 0, total: 0 }, buy: { count: 0, total: 0 } };
-    for (const row of rows) totals[row._id] = { count: row.count, total: row.cents / 100 };
+    const totals = await projectRevenue();
     res.set("Cache-Control", "private, no-store").json(totals);
   } catch (err) {
     next(err);
