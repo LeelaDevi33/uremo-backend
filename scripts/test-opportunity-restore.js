@@ -98,6 +98,7 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
       ["opportunitygrants", "userId,requestId"],
       ["wallettransactions", "settlementReference"],
       ["wallettransactions", "providerRef"],
+      ["wallettransactions", "adjustmentOperator,adjustmentKey"],
       ["withdrawalrequests", "userId,requestId"],
       ["rlhfsubmissions", "taskId,workerId"],
       ["users", "email"],

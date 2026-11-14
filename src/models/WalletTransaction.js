@@ -99,6 +99,9 @@ const walletTransactionSchema = new mongoose.Schema(
     // Admin verification evidence, kept out of user transaction responses.
     settlementReference: { type: String, select: false },
     settlementVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", select: false },
+    adjustmentOperator: { type: mongoose.Schema.Types.ObjectId, ref: "User", select: false },
+    adjustmentKey: { type: String, select: false },
+    undoTransactionId: { type: mongoose.Schema.Types.ObjectId, ref: "WalletTransaction" },
     // Reference to related document (order ID, etc.)
     referenceId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -140,6 +143,8 @@ walletTransactionSchema.index({ status: 1, createdAt: -1 });
 
 // PATCH_80: Index for provider reference lookups (webhook processing)
 walletTransactionSchema.index({ provider: 1, providerRef: 1 });
+walletTransactionSchema.index({ adjustmentOperator: 1, adjustmentKey: 1 }, { unique: true,
+  partialFilterExpression: { adjustmentKey: { $type: "string" }, adjustmentOperator: { $type: "objectId" } } });
 // Legacy PayPal orders have no wallet transaction ID in their purchase unit.
 // Their stored provider order ID must identify exactly one top-up, even after a retry.
 walletTransactionSchema.index({ providerRef: 1 }, { unique: true,

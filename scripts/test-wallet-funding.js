@@ -151,6 +151,43 @@ test("wallet funding methods and provider-confirmed settlement on mounted routes
     assert.equal((await Wallet.findOne({ user: other._id, provider: "paypal", amount: 11 })).status, "failed");
     assert.equal(await balance(other), 8.25);
   });
+
+  await t.test("operator adjustments retry exactly once and reversal restores the original earnings eligibility", async t => {
+    delete process.env.RESEND_API_KEY;
+    const member = await User.create({ name: "Review fixture", email: "adjust@example.test", password: randomUUID(),
+      walletBalance: 100, withdrawable: 90, pendingWithdrawals: 10, lifetimeEarnings: 100 });
+    const api = "/admin/wallet/adjust";
+    const body = { userId: member.id, amount: 30, type: "debit", description: "Operator correction", requestId: randomUUID() };
+    const adjust = (patch = {}) => request(api, admin, "POST", { ...body, ...patch });
+    const undo = id => request(api + "/" + id + "/undo", admin, "POST", {});
+    assert.equal((await request(api, worker, "POST", body)).status, 403);
+    const log = require("../src/models/AdminAuditLog");
+    const auditFailure = t.mock.method(log.prototype, "save", async () => { throw Error("Synthetic audit outage"); });
+    assert.equal((await adjust()).status, 500);
+    auditFailure.mock.restore();
+    assert.equal(await balance(member), 100);
+    assert.equal(await Wallet.countDocuments({ user: member._id }), 0);
+    const [a, b] = await Promise.all([adjust(), adjust()]);
+    assert.deepEqual([a.status, b.status], [200, 200]);
+    assert.equal(a.body.transactionId, b.body.transactionId);
+    assert.deepEqual([a.body.replayed, b.body.replayed].sort(), [false, true]);
+    assert.equal((await adjust({ amount: 39 })).status, 409);
+    assert.equal((await User.findById(member._id)).withdrawable, 60);
+    const history = async () => (await request("/admin/wallet/user/" + member.id, admin)).body.transactions;
+    assert.equal((await history())[0].canUndo, true);
+    const reversals = await Promise.all([undo(a.body.transactionId), undo(a.body.transactionId)]);
+    assert.deepEqual(reversals.map(r => r.status), [200, 200]);
+    assert.equal(reversals[0].body.transactionId, reversals[1].body.transactionId);
+    assert.equal(await Wallet.countDocuments({ user: member._id }), 2);
+    assert.ok((await history()).every(tx => !tx.canUndo && !tx.adjustmentKey));
+    const restored = await User.findById(member._id);
+    assert.deepEqual([restored.walletBalance, restored.withdrawable, restored.pendingWithdrawals, restored.lifetimeEarnings], [100, 90, 10, 100]);
+    const credit = await adjust({ requestId: randomUUID(), type: "credit", amount: 5 });
+    assert.equal(credit.status, 200);
+    assert.equal((await adjust({ requestId: randomUUID(), type: "debit", amount: 5 })).status, 200);
+    assert.equal((await undo(credit.body.transactionId)).status, 409);
+    assert.equal(await balance(member), 100);
+  });
 });
 
 test("the server fails startup before connecting when the JWT secret is missing", async () => {

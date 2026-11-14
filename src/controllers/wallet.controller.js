@@ -300,97 +300,30 @@ exports.payWithWallet = async (req, res) => {
 // ADMIN FUNCTIONS
 // ============================================
 
-/**
- * Admin: Adjust user wallet balance
- * POST /api/admin/wallet/adjust
- * Body: { userId, amount, type, description }
- * PATCH-64: Enhanced with guardrails and audit logging
- */
-exports.adminAdjustBalance = async (req, res) => {
+const adjustments = require("../services/walletAdjustments");
+
+async function respondToAdjustment(req, res, undo) {
   try {
-    const { logAdminAction } = require("../services/adminAudit.service");
-    const { userId, amount, type, description } = req.body;
-
-    if (!userId || !amount || !type) {
-      return res.status(400).json({
-        error: "userId, amount, and type (credit/debit) required",
-      });
-    }
-
-    if (!["credit", "debit"].includes(type)) {
-      return res.status(400).json({ error: "Type must be credit or debit" });
-    }
-
-    const numAmount = typeof amount === "string" ? Number(amount) : amount;
-    if (!isWalletAmount(numAmount)) return res.status(400).json({ error: "Use a positive USD amount with at most two decimals" });
-
-    // PATCH-64 GUARDRAIL: Require description/reason for all adjustments
-    if (!description || description.trim().length < 5) {
-      return res.status(400).json({
-        error: "Description is required (minimum 5 characters)",
-        hint: "Provide a reason for this wallet adjustment",
-      });
-    }
-
-    if (numAmount > 1000) {
-      console.warn("[AUDIT] Large wallet adjustment", { userId, amount: numAmount, type, adminId: req.user.id });
-    }
-    const updatedUser = await User.db.transaction(async session => {
-      const funds = await changeFunds(userId, numAmount, type === "credit" ? "credit" : "spend", session);
-      await WalletTransaction.create([{
-        user: userId, type, amount: numAmount, source: "admin_adjustment", status: "success", provider: "manual",
-        description, balanceBefore: funds.balanceBefore, balanceAfter: funds.walletBalance,
-      }], { session, ordered: true });
-      const identity = await User.findById(userId).select("name email").session(session).lean();
-      return { ...funds, ...identity };
-    });
-    const previousBalance = updatedUser.balanceBefore;
-
-    // PATCH-64: Log admin action
-    await logAdminAction({
-      adminId: req.user?._id || req.user?.id,
-      adminEmail: req.user?.email,
-      action: type === "credit" ? "wallet_credit" : "wallet_debit",
-      entityType: "wallet",
-      entityId: String(userId),
-      previousState: { balance: previousBalance },
-      newState: { balance: updatedUser.walletBalance },
-      reason: description,
-      metadata: { amount: numAmount, type },
-    });
-
-    // PATCH_29: Notify user about wallet update
-    try {
-      const action = type === "credit" ? "credited" : "debited";
+    const { receipt, replayed } = undo ? await adjustments.undo(req.user, req.params.id) : await adjustments.adjust(req.user, req.body);
+    const action = receipt.type === "credit" ? "credited" : "debited";
+    if (!replayed) {
       await sendNotification({
-        userId: userId,
-        title: "Wallet Update",
-        message: `Your wallet has been ${action} $${numAmount.toFixed(2)}. New balance: $${updatedUser.walletBalance.toFixed(2)}`,
-        type: "wallet",
-      });
-    } catch (notifErr) {
-      console.error(
-        "[notification] wallet adjustment failed:",
-        notifErr.message,
-      );
+        userId: receipt.user, title: "Wallet Update", type: "wallet",
+        message: `Your wallet was ${action} $${receipt.amount.toFixed(2)}. Balance after adjustment: $${receipt.balanceAfter.toFixed(2)}`,
+      }).catch(err => console.warn("[notification] wallet adjustment failed:", err.name));
     }
-
-    res.json({
-      success: true,
-      message: `Successfully ${type}ed $${numAmount.toFixed(2)} ${type === "credit" ? "to" : "from"} user wallet`,
-      user: {
-        _id: updatedUser._id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        walletBalance: updatedUser.walletBalance,
-      },
-    });
+    const user = await User.findById(receipt.user).select("name email walletBalance").lean();
+    res.json({ success: true, transactionId: receipt._id, replayed, user,
+      message: undo ? "Adjustment reversed." : `Wallet ${action} $${receipt.amount.toFixed(2)}.` });
   } catch (err) {
     if (err.status) return res.status(err.status === 402 ? 400 : err.status).json({ error: err.message, ...err.fields });
-    console.error("adminAdjustBalance error:", err);
-    res.status(500).json({ error: "Failed to adjust balance" });
+    console.error("Wallet adjustment failed", { name: err.name, code: err.code });
+    res.status(500).json({ error: "Failed to adjust balance. Retry with the same request." });
   }
-};
+}
+
+exports.adminAdjustBalance = (req, res) => respondToAdjustment(req, res, false);
+exports.adminUndoAdjustment = (req, res) => respondToAdjustment(req, res, true);
 
 /**
  * PATCH_80: Admin - Get all pending topup requests
@@ -630,7 +563,7 @@ exports.adminGetUserWallet = async (req, res) => {
 
     const [transactions, total] = await Promise.all([
       WalletTransaction.find({ user: userId })
-        .select("+settlementReference +settlementVerifiedBy")
+        .select("+settlementReference +settlementVerifiedBy +adjustmentKey")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -646,7 +579,9 @@ exports.adminGetUserWallet = async (req, res) => {
         email: user.email,
         walletBalance: user.walletBalance,
       },
-      transactions,
+      transactions: transactions.map(({ adjustmentKey, ...tx }) => ({
+        ...tx, canUndo: tx.source === "admin_adjustment" && tx.status === "success" && Boolean(adjustmentKey) && !tx.undoTransactionId,
+      })),
       pagination: {
         page,
         limit,

@@ -34,6 +34,7 @@ router.get("/user/:userId", walletController.adminGetUserWallet);
 
 // POST /api/admin/wallet/adjust - Adjust user balance
 router.post("/adjust", walletController.adminAdjustBalance);
+router.post("/adjust/:id/undo", walletController.adminUndoAdjustment);
 
 // PATCH_110: Withdrawal management
 // GET /api/admin/wallet/withdrawals - List all withdrawal requests
