@@ -172,8 +172,7 @@ exports.signup = async (req, res, next) => {
         });
       } catch (err) {
         console.error("[email] welcome failed", {
-          userEmail: user.email,
-          message: err?.message || String(err),
+          code: err?.code || "EMAIL_SEND_FAILED",
         });
       }
     });
@@ -203,13 +202,6 @@ exports.login = async (req, res) => {
   try {
     const { email, password } = req.body || {};
 
-    console.log("[LOGIN]", {
-      origin: req.headers.origin,
-      referer: req.headers.referer,
-      email: typeof email === "string" ? email.trim().toLowerCase() : undefined,
-      hasPassword: Boolean(password),
-    });
-
     // PATCH_54: Standardized error response
     if (!email || !password) {
       return res.status(400).json({
@@ -231,10 +223,6 @@ exports.login = async (req, res) => {
 
     const isMatch = await bcryptjs.compare(String(password), user.password);
     if (!isMatch) {
-      console.warn("[LOGIN_BAD_PASSWORD]", {
-        userId: String(user._id),
-        email: user.email,
-      });
       // Legacy compatibility: if a user was seeded with plaintext password,
       // allow one successful login and upgrade to bcrypt.
       if (
@@ -244,10 +232,7 @@ exports.login = async (req, res) => {
       ) {
         user.markModified("password");
         await user.save();
-        console.warn("[auth] upgraded legacy plaintext password", {
-          userId: String(user._id),
-          email: user.email,
-        });
+        console.info("[auth] upgraded legacy password storage");
       } else {
         return res.status(401).json({
           success: false,
