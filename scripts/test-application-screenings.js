@@ -47,6 +47,21 @@ test("applications only qualify on their unlocked, assigned screenings", { skip:
   const submit = (id, extra = {}) => call(route(id) + "/submit", { positionId: record._id, answers: ["yes"], ...extra });
   const review = (id, action) => call("/admin/workspace/screening-submissions/" + record._id + "/review", { screeningId: id, action }, admin);
   const getStatus = async () => (await Application.findById(record._id).lean()).workerStatus;
+  await t.test("only approved active applications receive private training from the profile", async () => {
+    const material = { title: "Private training", type: "pdf", url: "https://example.test/private-training.pdf" };
+    const privateRole = await Role.create({ title: "Private role", category: "testing", trainingMaterials: [material], screeningIds: [one._id] });
+    const pending = await Application.create({ user, position: privateRole._id, status: "pending", workerStatus: "applied" });
+    const profile = async () => (await call("/workspace/profile")).body.applications.find(row => row._id === String(pending._id));
+    for (const [status, workerStatus, allowed] of [
+      ["pending","applied",false], ["approved","screening_unlocked",true], ["approved","suspended",false], ["rejected","inactive",false],
+    ]) {
+      await Application.updateOne({ _id: pending._id }, { status, workerStatus });
+      const row = await profile();
+      assert.equal(JSON.stringify(row).includes(material.url), allowed);
+      assert.equal(row.requiredScreenings.length, allowed ? 1 : 0);
+    }
+    await Application.deleteOne({ _id: pending._id });
+  });
   await t.test("legacy unlocked training, active flags, assignment and private answers", async () => {
     assert.equal((await call("/workspace/application/" + record._id + "/mark-training-viewed", {}, user, "PUT")).status, 200);
     assert.equal((await call(route(foreign._id))).status, 403);
@@ -118,6 +133,46 @@ test("applications only qualify on their unlocked, assigned screenings", { skip:
     const reviewed = await call("/admin/proofs/" + proof.body.proof._id + "/approve", {}, admin, "PUT");
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed));
   });
+  await t.test("dataset assignments expose only active tasks and pay each approved submission exactly once", async t => {
+    const Dataset = require("../src/models/Dataset"), Task = require("../src/models/DatasetTask");
+    const Submission = require("../src/models/RlhfSubmission"), Wallet = require("../src/models/WalletTransaction");
+    await Submission.init();
+    const dataset = await Dataset.create({ name: "Writing fixture", datasetType: "generation", isActive: true });
+    const task = await Task.create({ datasetId: dataset._id, prompt: "Summarize this example.", correctAnswer: "Private rubric" });
+    const otherTask = await Task.create({ datasetId: new mongoose.Types.ObjectId(), prompt: "Other dataset task" });
+    const project = await Project.create({ title: "Task review", category: "writing", status: "assigned",
+      projectType: "rlhf_dataset", assignedTo: user, workPositionId: role._id, datasetId: dataset._id, payRate: 0, rewardPerTask: 5.25 });
+    const url = "/workspace/project/" + project._id;
+    assert.equal((await call(url + "/rlhf-tasks", null, admin)).status, 403);
+    const listed = await call(url + "/rlhf-tasks");
+    assert.equal(listed.status, 200);
+    assert.deepEqual(listed.body.tasks.map(row => row._id), [String(task._id)]);
+    assert.ok(!JSON.stringify(listed.body).includes(task.correctAnswer));
+    const submit = taskId => call(url + "/rlhf-submit", { taskId, answerPayload: { response: "Fixture answer" } });
+    assert.equal((await submit(otherTask._id)).status, 404);
+    const row = (await submit(task._id)).body.submission;
+    assert.equal(row.workerId, String(user));
+    const review = changes => call("/admin/datasets/rlhf/submissions/" + row._id + "/review",
+      { action: "approved", finalScore: 0, ...changes }, admin);
+    const before = await User.findById(user);
+    assert.equal((await review({ rewardOverride: -1 })).status, 400);
+    const failLedger = t.mock.method(Wallet, "create", async () => { throw Error("Synthetic payment failure"); });
+    assert.equal((await review()).status, 500);
+    failLedger.mock.restore();
+    assert.equal((await Submission.findById(row._id)).reviewStatus, "pending_review");
+    assert.equal((await User.findById(user)).walletBalance, before.walletBalance);
+    const decisions = await Promise.all([review(), review()]);
+    assert.deepEqual(decisions.map(r => r.status).sort(), [200, 409]);
+    const approved = decisions.find(r => r.status === 200).body.submission;
+    assert.equal(approved.reviewedBy, String(admin));
+    assert.equal(approved.rewardAmount, 5.25);
+    const paid = await User.findById(user);
+    for (const field of ["walletBalance", "lifetimeEarnings", "withdrawable"]) assert.equal(paid[field], (before[field] || 0) + 5.25);
+    assert.equal(await Wallet.countDocuments({ referenceId: row._id, user, source: "earning", type: "credit", amount: 5.25 }), 1);
+    await Project.updateOne({ _id: project._id }, { status: "cancelled" });
+    assert.equal((await submit(task._id)).status, 409);
+  });
+
   await t.test("legacy reset commands cannot erase operational balances", async () => {
     await User.updateOne({ _id: user }, { walletBalance: 31, affiliateBalance: 9 });
     for (const [operation, confirm] of [["wallets", "RESET_ALL_WALLETS"], ["affiliate", "RESET_ALL_AFFILIATE"], ["all-test-data", "RESET_ALL_TEST_DATA"]]) {

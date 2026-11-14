@@ -27,13 +27,13 @@ const {
  */
 exports.getWorkspaceProfile = async (req, res) => {
   try {
+    res.set("Cache-Control", "private, no-store");
     // PATCH_43: Get ALL job applications for the user (multi-job support)
     const applications = await ApplyWork.find({ user: req.user.id })
       .populate(
         "position",
         "_id title category description trainingMaterials hasScreening screeningId screeningIds",
       )
-      .populate("currentProject", "title status payRate payType")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -45,29 +45,22 @@ exports.getWorkspaceProfile = async (req, res) => {
       });
     }
 
-    // Enrich each application with screening/project info
+    const projects = await Project.find({ assignedTo: req.user.id, status: { $in: ["assigned", "in_progress", "completed"] } })
+      .select("title description payRate payType deadline status workPositionId earningsCredited completedAt").lean();
+    const states = await paidProjectAccess(null, projects.map(project => project._id));
+    const assignments = projects.filter(project => !states.get(String(project._id))?.required);
+
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
-        const requiredScreenings = await screeningRules.requiredSummaries(app.position, app.category);
+        const trainingAvailable = app.status === "approved" && !["suspended", "inactive"].includes(app.workerStatus);
+        const requiredScreenings = trainingAvailable ? await screeningRules.requiredSummaries(app.position, app.category) : [];
         const screening = requiredScreenings[0] || null;
-
-        // Get assigned projects for this application
-        const assignedProjects = await Project.find({
-          assignedTo: req.user.id,
-          workPositionId: app.position?._id || null,
-          status: { $in: ["assigned", "in_progress"] },
-        })
-          .select("title description payRate payType deadline status")
-          .lean();
-
-        // Get completed projects
-        const completedProjects = await Project.find({
-          assignedTo: req.user.id,
-          workPositionId: app.position?._id || null,
-          status: "completed",
-        })
-          .select("title payRate earningsCredited completedAt")
-          .lean();
+        const trainingMaterials = trainingAvailable ? app.position?.trainingMaterials || [] : [];
+        const roleProjects = assignments.filter(project => String(project.workPositionId || "") === String(app.position?._id || ""));
+        const assignedProjects = roleProjects.filter(p => p.status !== "completed")
+          .map(({ _id, title, description, payRate, payType, deadline, status }) => ({ _id, title, description, payRate, payType, deadline, status }));
+        const completedProjects = roleProjects.filter(p => p.status === "completed")
+          .map(({ _id, title, payRate, earningsCredited, completedAt }) => ({ _id, title, payRate, earningsCredited, completedAt }));
 
         // Normalize legacy worker status
         let normalizedStatus = app.workerStatus || "applied";
@@ -78,7 +71,7 @@ exports.getWorkspaceProfile = async (req, res) => {
 
         return {
           _id: app._id,
-          position: app.position,
+          position: app.position ? { ...app.position, trainingMaterials } : null,
           positionTitle: app.positionTitle || app.position?.title || "",
           category: app.category || app.position?.category || "",
           workerStatus: normalizedStatus,
@@ -90,7 +83,7 @@ exports.getWorkspaceProfile = async (req, res) => {
           payRate: app.payRate || 0,
           screening,
           requiredScreenings,
-          trainingMaterials: app.position?.trainingMaterials || [],
+          trainingMaterials,
           assignedProjects,
           completedProjects,
           screeningsCompleted: app.screeningsCompleted || [],

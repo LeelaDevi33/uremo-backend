@@ -5,6 +5,7 @@ const models = [
   require("../models/OpportunityGrant"),
   require("../models/WalletTransaction"),
   require("../models/WithdrawalRequest"),
+  require("../models/RlhfSubmission"),
 ];
 
 async function verifyMarketplaceIndexes(db) {

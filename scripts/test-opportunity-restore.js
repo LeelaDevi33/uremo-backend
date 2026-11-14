@@ -99,6 +99,7 @@ test("a logical marketplace restore into a fresh API process preserves sale, acc
       ["wallettransactions", "settlementReference"],
       ["wallettransactions", "providerRef"],
       ["withdrawalrequests", "userId,requestId"],
+      ["rlhfsubmissions", "taskId,workerId"],
       ["users", "email"],
     ]) {
       assert.ok(restoredIndexes.some(index => index.collection === collection && Object.keys(index.keys).join(",") === fields),
