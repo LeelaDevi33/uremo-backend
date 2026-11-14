@@ -114,6 +114,8 @@ const walletTransactionSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
+    // Portion of this marketplace charge or refund backed by withdrawable earnings.
+    withdrawablePortion: { type: Number, min: 0 },
     // Balance after this transaction (set when status becomes 'success')
     balanceAfter: {
       type: Number,

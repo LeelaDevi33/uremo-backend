@@ -363,6 +363,7 @@ function checkout(type) {
           user: userId, type: "debit", source: isRental ? "rental_purchase" : "service_purchase",
           status: "success", provider: "internal", referenceId: grant._id, amount,
           balanceBefore: account.balanceBefore, balanceAfter: account.walletBalance,
+          withdrawablePortion: Number((account.withdrawableBefore - account.withdrawable).toFixed(2)),
           description: (isRental ? "Opportunity rental: " : "Exclusive opportunity purchase: ") + item.title,
         }], { session, ordered: true });
         return { ok: true, grant: grantView(grant, now), walletBalance: account.walletBalance, replayed: false };
@@ -408,9 +409,11 @@ async function refund(req, res) {
     if (priorRefund) throw error(409, "A prior refund requires reconciliation.");
     const offer = await Opportunity.findById(grant.opportunityId).session(session);
     if (!offer) throw error(409, "Restore the original listing before refunding this receipt.");
-    const funds = await changeFunds(grant.userId, grant.amount, "credit", session);
+    // Older debits did not record their funding mix. Preserve their existing wallet-credit behavior.
+    const withdrawableRefund = debits[0].withdrawablePortion ?? 0;
+    const funds = await changeFunds(grant.userId, grant.amount, "refund", session, { withdrawableRefund });
     const [credit] = await WalletTransaction.create([{ user: grant.userId, type: "credit", source: "refund", status: "success",
-      provider: "internal", referenceId: grant._id, amount: grant.amount,
+      provider: "internal", referenceId: grant._id, amount: grant.amount, withdrawablePortion: withdrawableRefund,
       balanceBefore: funds.balanceBefore, balanceAfter: funds.walletBalance, description: "Project access refund: " + grant.title }], { session, ordered: true });
     grant.set({ refundedAt: new Date(), refundedBy: req.user.id, refundReason: reason.trim(), refundTransactionId: credit._id });
     await grant.save({ session });

@@ -18,7 +18,7 @@ function availableFunds(user) {
 
 // All callers use the same user document in their ledger/receipt transaction.
 // A competing wallet mutation produces a write conflict and retries the whole operation.
-async function changeFunds(userId, amount, action, session) {
+async function changeFunds(userId, amount, action, session, { withdrawableRefund = 0 } = {}) {
   if (!session?.inTransaction()) throw new Error("A wallet transaction is required");
   if (!isWalletAmount(amount)) throw walletError(400, "Enter a positive USD amount with at most two decimals");
   const user = await User.findById(userId).select("walletBalance withdrawable pendingWithdrawals lifetimeEarnings").session(session).lean();
@@ -45,6 +45,12 @@ async function changeFunds(userId, amount, action, session) {
     reserved -= value;
     if (action === "payout") total -= value;
     else eligible = Math.max(0, Math.min(eligible + value, total - reserved));
+  } else if (action === "refund") {
+    if (withdrawableRefund !== 0 && (!isWalletAmount(withdrawableRefund) || withdrawableRefund > amount)) {
+      throw walletError(409, "The original withdrawal eligibility needs reconciliation");
+    }
+    total += value;
+    eligible += toCents(withdrawableRefund);
   } else if (action === "credit" || action === "earning") {
     total += value;
     if (action === "earning") eligible = Math.min(eligible + value, Math.max(0, total - reserved));
@@ -61,6 +67,6 @@ async function changeFunds(userId, amount, action, session) {
     update.lifetimeEarnings = lifetime / 100;
   }
   await User.updateOne({ _id: userId }, { $set: { ...update, lastWalletUpdate: new Date() } }, { session });
-  return { ...update, balanceBefore: before };
+  return { ...update, balanceBefore: before, withdrawableBefore: funds.withdrawable };
 }
 module.exports = { availableFunds, changeFunds, isWalletAmount };

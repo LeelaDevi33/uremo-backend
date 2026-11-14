@@ -98,6 +98,37 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
     }
   });
 
+  await t.test("refund restores only the earned portion, across reserved withdrawals, later deposits and retries", async () => {
+    const member = { _id: new mongoose.Types.ObjectId(), role: "user" };
+    await User.collection.insertOne({ ...member, email: randomUUID() + "@example.test", walletBalance: 100, withdrawable: 60, pendingWithdrawals: 20, lifetimeEarnings: 95 });
+    const item = await create({ buyPrice: 35.25 });
+    const paid = await charge(item, member, "buy", { requestId: randomUUID(), expectedAmount: 35.25 });
+    assert.equal(paid.status, 201);
+    const receiptId = paid.grant._id;
+    const debit = await Wallet.findOne({ referenceId: receiptId, type: "debit" });
+    assert.equal(debit.withdrawablePortion, 15.25);
+    const afterCharge = await User.findById(member._id);
+    assert.equal(afterCharge.withdrawable, 44.75);
+    await User.updateOne({ _id: member._id }, { $inc: { walletBalance: 10 } });
+    const refundUrl = adminApi + "/receipts/" + receiptId + "/refund";
+    for (let retry = 0; retry < 2; retry++) {
+      assert.equal((await req(refundUrl, admin, "POST", { reason: "Verified failed handoff" })).status, 200);
+    }
+    const final = await User.findById(member._id);
+    assert.deepEqual([final.walletBalance, final.withdrawable, final.pendingWithdrawals, final.lifetimeEarnings], [110, 60, 20, 95]);
+    const credits = await Wallet.find({ referenceId: receiptId, type: "credit", source: "refund" });
+    assert.deepEqual(credits.map(row => row.withdrawablePortion), [15.25]);
+
+    const old = await create({});
+    const historic = await charge(old, member, "buy", terms("buy"));
+    await Wallet.updateOne({ referenceId: historic.grant._id, type: "debit" }, { $unset: { withdrawablePortion: 1 } });
+    const prior = await User.findById(member._id);
+    assert.equal((await req(adminApi + "/receipts/" + historic.grant._id + "/refund", admin, "POST", { reason: "Historical review" })).status, 200);
+    const restored = await User.findById(member._id);
+    assert.equal(restored.withdrawable, prior.withdrawable);
+    assert.equal(restored.walletBalance, 110);
+  });
+
   await t.test("every historical and current listing revision guards its full editor and status actions", async () => {
     const item = await create({});
     const path = adminApi + "/" + item._id;
