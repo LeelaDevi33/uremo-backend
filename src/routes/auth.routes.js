@@ -1,5 +1,5 @@
 const express = require("express");
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("../middlewares/rateLimit");
 const {
   signup,
   login,

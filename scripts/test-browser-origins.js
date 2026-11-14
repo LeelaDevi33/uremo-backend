@@ -2,6 +2,28 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const test = require("node:test");
 
+test("authentication limits distinguish Render's ingress clients and ignore forwarded addresses locally", async t => {
+  const express = require("express");
+  const limit = require("../src/middlewares/rateLimit");
+  const app = express();
+  const original = process.env.RENDER;
+  t.after(() => { if (original === undefined) delete process.env.RENDER; else process.env.RENDER = original; });
+  for (const path of ["/render", "/local"]) {
+    app.get(path, limit({ limit: 1, windowMs: 60000 }), (_req,res) => res.sendStatus(200));
+  }
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise(resolve => server.once("listening", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const read = (path, edge) => fetch("http://127.0.0.1:" + server.address().port + path, { headers: { "CF-Connecting-IP": edge } });
+  process.env.RENDER = "true";
+  assert.equal((await read("/render", "192.0.2.1")).status, 200);
+  assert.equal((await read("/render", "192.0.2.2")).status, 200);
+  assert.equal((await read("/render", "192.0.2.1")).status, 429);
+  delete process.env.RENDER;
+  assert.equal((await read("/local", "192.0.2.1")).status, 200);
+  assert.equal((await read("/local", "192.0.2.2")).status, 429);
+});
+
 test("HTTP and Socket.IO use the same browser origins", async (t) => {
   process.env.FRONTEND_URL = "https://frontend.qa.example/";
   process.env.CORS_ALLOWED_ORIGINS = "https://staging.qa.example, https://preview.qa.example:8443";

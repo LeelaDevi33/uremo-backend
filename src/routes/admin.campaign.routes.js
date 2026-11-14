@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const engagementService = require("../services/engagement.service");
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("../middlewares/rateLimit");
 const adminMiddleware = require("../middlewares/admin.middleware");
 
 const logger = {

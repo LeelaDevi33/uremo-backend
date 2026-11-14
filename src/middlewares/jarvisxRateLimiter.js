@@ -7,7 +7,7 @@
  * - Different limits for different endpoints
  */
 
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("./rateLimit");
 
 // =============================================================================
 // RATE LIMIT CONFIGURATIONS

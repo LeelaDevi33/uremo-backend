@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/auth.middleware");
 const User = require("../models/User");
-const rateLimit = require("express-rate-limit");
+const rateLimit = require("../middlewares/rateLimit");
 
 const VALID_INTERESTS = ["microjobs", "rentals", "project_purchase"];
 const MAX_INTERESTS = 10;
