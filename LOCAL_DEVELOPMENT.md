@@ -122,6 +122,10 @@ The wallet audit matches each paid access receipt to its original debit. For a r
 
 Render checks `/api/health/ready` for database connectivity. Set the production service’s health-check path after the compatible API has deployed there.
 
+The API needs Node 24, a nonempty `JWT_SECRET` and a MongoDB database that accepts multi-document transactions. Startup performs a read-only transaction and verifies the unique account, checkout, withdrawal, dataset submission and payment indexes before listening. Check the service’s `NODE_VERSION` environment variable when confirming the runtime on Render. It takes precedence over the package’s `engines.node` range. [Render Node version selection](https://render.com/docs/node-version)
+
+Set `ADMIN_EMAIL` to the comma-separated operator addresses that should receive application and order notices. A blank setting disables those notices. Configure a verified sender and `RESEND_API_KEY` before testing email delivery to a controlled inbox.
+
 ## Operate wallet funding
 
 In **Admin → Payments → Wallet funding methods**, choose **Add funding method**. Enter the method name, receiving details and transfer instructions, then activate it when the receiving account is ready. For a manual method such as Binance Pay, specify the supported transfer type, currency, receiving identifier and which transaction ID the sender should enter. Inactive methods disappear from the worker's wallet. An admin can continue reviewing requests that were submitted while the method was active.
@@ -150,3 +154,14 @@ db.wallettransactions.aggregate([
 ```
 
 Review any matches against their original payment evidence. Reject duplicate requests individually through the previous admin release, preserving their history and the legitimate transfer. Verify the indexes and reconcile wallets on the restored copy before rollout.
+
+Historical PayPal orders must also identify a single wallet request. Check for duplicate order references on a restored copy before starting the candidate. Resolve ambiguous ownership against the provider’s settlement records. Keep both original ledger records until the reconciliation is reviewed.
+
+```javascript
+db.wallettransactions.aggregate([
+  { $match: { provider: "paypal", source: "topup", providerRef: { $type: "string" } } },
+  { $group: { _id: "$providerRef", count: { $sum: 1 } } },
+  { $match: { count: { $gt: 1 } } },
+  { $count: "duplicatePayPalOrderGroups" }
+])
+```

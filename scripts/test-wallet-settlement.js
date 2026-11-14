@@ -49,6 +49,28 @@ test("wallet, account and scheduler regression checks", { skip: !port }, async (
   const pay = (id, extra) => post("/wallet/pay", { orderId: String(id), ...extra });
   const balance = async () => (await User.findById(buyer._id)).walletBalance;
 
+  await t.test("mail delivery requires provider acceptance and admin alerts use configured recipients", async t => {
+    const { getAdminEmails, sendEmail } = require("../src/services/email.service");
+    const { Resend } = require("resend");
+    const oldAdmin = process.env.ADMIN_EMAIL;
+    t.after(() => {
+      if (oldAdmin === undefined) delete process.env.ADMIN_EMAIL;
+      else process.env.ADMIN_EMAIL = oldAdmin;
+      delete process.env.RESEND_API_KEY;
+    });
+    delete process.env.ADMIN_EMAIL;
+    assert.deepEqual(getAdminEmails(), []);
+    process.env.ADMIN_EMAIL = "editor@example.test, staff@example.test";
+    assert.deepEqual(getAdminEmails(), ["editor@example.test", "staff@example.test"]);
+    process.env.RESEND_API_KEY = "fixture-test-key";
+    let result = { data: null, error: { name: "validation_error" } };
+    t.mock.method(Resend.prototype, "post", async () => result);
+    const mail = { to: "recipient@example.test", subject: "Fixture", text: "Local test" };
+    await assert.rejects(sendEmail(mail), err => err.code === "EMAIL_SEND_FAILED");
+    result = { data: { id: "local-message" }, error: null };
+    assert.equal((await sendEmail(mail)).data.id, "local-message");
+  });
+
   await t.test("pre-cutover quotes survive a catalog edit and eight overlapping requests settle once", async () => {
     const reservation = await post("/orders", { serviceId });
     assert.equal(reservation.status, 410);
@@ -140,6 +162,9 @@ test("wallet, account and scheduler regression checks", { skip: !port }, async (
       assert.equal((await fetch(url + path)).status, 401);
       assert.equal((await fetch(url + path + "?secret=incorrect")).status, 401);
     }
+    const reminders = url + "/cron/payment-pending-reminders";
+    assert.equal((await fetch(reminders, { headers: { authorization: "Bearer incorrect" } })).status, 401);
+    assert.equal((await fetch(reminders, { headers: { authorization: "Bearer local-cron-test" } })).status, 200);
   });
 
   await t.test("registered users count excludes administrators and includes old user records", async () => {

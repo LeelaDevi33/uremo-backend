@@ -10,7 +10,7 @@ const { runEngagementBatch } = require("../cron/engagement.cron");
 const { runEngagementCycle } = require("../services/smartEngagement.service");
 
 // Secret-protected cron endpoint.
-// Call: GET /api/cron/payment-pending-reminders?secret=...
+// Send the scheduler credential in the Authorization bearer header.
 router.get("/payment-pending-reminders", paymentPendingReminders);
 
 // PATCH_22: Expire rentals that have passed their end date

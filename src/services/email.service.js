@@ -1,7 +1,5 @@
 const { Resend } = require("resend");
 
-const DEFAULT_ADMIN_EMAIL = "sajalnew01@gmail.com";
-
 function parseEmailList(value) {
   return String(value || "")
     .split(",")
@@ -10,8 +8,7 @@ function parseEmailList(value) {
 }
 
 function getAdminEmails() {
-  const list = parseEmailList(process.env.ADMIN_EMAIL);
-  return list.length ? list : [DEFAULT_ADMIN_EMAIL];
+  return parseEmailList(process.env.ADMIN_EMAIL);
 }
 
 async function sendEmail({ to, subject, html, text }) {
@@ -54,11 +51,12 @@ async function sendEmail({ to, subject, html, text }) {
     });
 
     const id = result?.data?.id || result?.id;
-    console.log("[email] sent", { to, subject, id });
+    if (result?.error || !id) throw new Error("Email provider did not accept the message");
+    console.log("[email] accepted", { id });
     return result;
   } catch (error) {
     const message = error?.message || String(error);
-    console.error("[email] failed", { to, subject, message });
+    console.error("[email] failed", { message });
     const err = new Error(`Failed to send email: ${message}`);
     err.cause = error;
     err.code = "EMAIL_SEND_FAILED";
