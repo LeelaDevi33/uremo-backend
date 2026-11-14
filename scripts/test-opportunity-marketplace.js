@@ -67,6 +67,33 @@ test("project marketplace through mounted HTTP routes", { skip: !port }, async t
   const charge = (item, user, mode, body = terms(mode)) => req(api + "/" + item._id + "/" + mode, user, "POST", body);
   const access = (item, user) => req(api + "/" + item._id + "/access", user);
 
+  await t.test("an admin can open the same private Lumiere sample twice and keep manual edits", async () => {
+    const path = adminApi + "/samples/lumiere";
+    assert.equal((await req(path, null, "POST")).status, 401);
+    assert.equal((await req(path, renter, "POST")).status, 403);
+    const results = await Promise.all([req(path, admin, "POST"), req(path, admin, "POST")]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+    assert.equal(results[0].id, results[1].id);
+    const id = results[0].id;
+    const { opportunity } = await req(adminApi + "/" + id, admin);
+    assert.equal(opportunity.title, "Lumiere Life Science");
+    assert.deepEqual([opportunity.status, opportunity.rightsConfirmed, opportunity.rentPrice, opportunity.rentalDays, opportunity.buyPrice],
+      ["draft", false, 15, 7, 60]);
+    const project = await Project.findById(opportunity.projectId);
+    assert.equal(project.status, "draft");
+    assert.equal(project.deliverables.length, 2);
+    assert.equal(String(project.createdBy), String(admin._id));
+    assert.equal((await Role.findById(project.workPositionId)).active, false);
+    assert.equal((await req(api + "/" + id, null)).status, 404);
+    const edited = await updateListing(opportunity, { title: "Operator review draft", buyPrice: 49 });
+    assert.equal(edited.status, 200);
+    assert.equal((await req(path, admin, "POST")).created, false);
+    const reopened = (await req(adminApi + "/" + id, admin)).opportunity;
+    assert.equal(reopened.title, "Operator review draft");
+    assert.equal(reopened.buyPrice, 49);
+    assert.equal(await Opportunity.countDocuments({ projectId: project._id }), 1);
+  });
+
   await t.test("reviewed rent and sale refunds repay exactly once, revoke all access and leave the offer closed", async () => {
     const { acquiredProjects } = require("../src/services/profileProjects");
     for (const [type, member] of [["rent", renter], ["buy", buyer]]) {

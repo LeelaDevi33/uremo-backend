@@ -88,10 +88,10 @@ router.post("/notify-ready-workers", auth, adminAuth, async (req, res) => {
   try {
     const { jobTitle, jobCategory, jobId } = req.body;
 
-    if (!jobTitle) {
+    if (!jobId) {
       return res.status(400).json({
         success: false,
-        message: "jobTitle is required",
+        message: "Select a project to notify workers",
       });
     }
 
@@ -103,7 +103,7 @@ router.post("/notify-ready-workers", auth, adminAuth, async (req, res) => {
     });
   } catch (error) {
     console.error("[engagement] notify-ready-workers failed:", error.message);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: "Failed to notify ready workers",
       error: error.message,

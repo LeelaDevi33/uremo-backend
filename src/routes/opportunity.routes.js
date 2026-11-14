@@ -23,6 +23,7 @@ publicRoutes.get("/:id", optionalAuth, controller.publicDetail);
 
 adminRoutes.get("/", controller.adminListings);
 adminRoutes.post("/", controller.saveListing);
+adminRoutes.post("/samples/lumiere", controller.lumiereSample);
 adminRoutes.post("/receipts/:id/refund", controller.refund);
 adminRoutes.get("/:id", controller.adminDetail);
 adminRoutes.patch("/:id", controller.saveListing);

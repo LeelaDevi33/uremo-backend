@@ -36,6 +36,8 @@ npm run preview:marketplace -- --demo --production
 
 The local `--demo` option also creates a draft named **Lumiere Life Science**. It includes a fictional seed-germination brief, two required deliverables, a private handoff, a seven-day rental at USD 15 and Full Access at USD 60. Running the demo again preserves manual edits. Its rights confirmation starts unchecked. [Open the draft in the November local preview](http://localhost:3157/admin/opportunities?edit=6af72a53dc662aac800b4e2d).
 
+On a hosted installation, choose **Admin → Project offers → Open Lumiere sample**. The first click creates a private draft, its project and an inactive specialization in one transaction. Later clicks reopen the same offer. The hosted sample becomes available to workers only after an admin configures its role, confirms the rights and publishes the offer.
+
 Open **Admin → Project offers**, choose Lumiere, then edit the public brief, category, access options, prices, rental duration and private handoff. **Open linked project** opens the project instructions and deliverables. **Edit specialization** opens the role and qualification settings. Save each form where you changed it. To publish real inventory, review the handoff, confirm the terms with the rights holder and publish the offer.
 
 For a reviewed refund, open **Project offers → Access receipts**, choose the receipt and record the reason. Confirmation credits the member's wallet once, preserves the original debit and receipt, revokes the grant and archives the listing for review. Confirm both the wallet entry and the listing status after issuing a refund.

@@ -9,6 +9,7 @@ const Screening = require("../models/Screening");
 const ApplyWork = require("../models/ApplyWork");
 const { specializationRoles } = require("../services/roleCatalog");
 const { meetsScreenings } = require("../services/roleProjects");
+const { createLumiereSample } = require("../services/lumiereSample");
 
 const categories = Opportunity.schema.path("category").enumValues;
 const limits = { title: 160, description: 4000, category: 80, deliverable: 8000 };
@@ -426,4 +427,9 @@ async function refund(req, res) {
   res.json({ ok: true, grant: grantView(receipt), refundTransactionId: receipt.refundTransactionId });
 }
 
-module.exports = { publicOfferFacts, saveListing, publicListings, publicDetail, adminListings, adminDetail, checkout, mine, access, refund };
+async function lumiereSample(req, res) {
+  const result = await Opportunity.db.transaction(session => createLumiereSample(session, { createdBy: req.user.id }));
+  res.status(result.created ? 201 : 200).json(result);
+}
+
+module.exports = { publicOfferFacts, saveListing, publicListings, publicDetail, adminListings, adminDetail, checkout, mine, access, refund, lumiereSample };
